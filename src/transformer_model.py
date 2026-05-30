@@ -172,6 +172,7 @@ def train_transformer(
     on_epoch: Callable[[TransformerEpochStats], None] | None = None,
     existing_model: MiniGPT | None = None,
     epoch_offset: int = 0,
+    should_stop: Callable[[], bool] | None = None,
 ) -> tuple[MiniGPT, list[TransformerEpochStats]]:
     """Тренирует MiniGPT на тексте."""
     device = get_device(cfg.device)
@@ -209,6 +210,9 @@ def train_transformer(
 
     n_seqs = n_data // cfg.seq_len
     for epoch in range(1, cfg.epochs + 1):
+        if should_stop and should_stop():
+            print(f"[train_transformer] остановлено пользователем на эпохе {epoch}")
+            break
         model.train()
         running = 0.0
         n_batches = 0

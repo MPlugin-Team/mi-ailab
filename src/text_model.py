@@ -151,6 +151,7 @@ def train_text(
     on_epoch: Callable[[TextEpochStats], None] | None = None,
     existing_model: CharLSTM | None = None,
     epoch_offset: int = 0,
+    should_stop: Callable[[], bool] | None = None,
 ) -> tuple[CharLSTM, list[TextEpochStats]]:
     """
     Тренирует char-LSTM на тексте. Возвращает (модель, история).
@@ -204,6 +205,11 @@ def train_text(
 
     n_seqs = n_data // cfg.seq_len
     for epoch in range(1, cfg.epochs + 1):
+        # Кнопка «Стоп» из UI — мягкая остановка между эпохами
+        if should_stop and should_stop():
+            print(f"[train_text] остановлено пользователем на эпохе {epoch}")
+            break
+
         model.train()
         running = 0.0
         n_batches = 0

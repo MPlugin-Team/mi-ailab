@@ -97,13 +97,14 @@ class MlpRegressor(nn.Module):
 # === Тренировка ===
 
 def train(
-    X: np.ndarray,                 # фичи [n_samples, n_features]
-    y: np.ndarray,                 # таргет [n_samples] для регрессии
+    X: np.ndarray,
+    y: np.ndarray,
     cfg: TrainConfig,
     on_epoch: Callable[[EpochStats], None] | None = None,
     val_split: float = 0.2,
     existing_model: MlpRegressor | None = None,
     epoch_offset: int = 0,
+    should_stop: Callable[[], bool] | None = None,
 ) -> tuple[MlpRegressor, list[EpochStats]]:
     """
     Тренирует MLP. Возвращает (модель, история).
@@ -197,6 +198,9 @@ def train(
     t0 = time.time()
 
     for epoch in range(1, cfg.epochs + 1):
+        if should_stop and should_stop():
+            print(f"[train MLP] остановлено пользователем на эпохе {epoch}")
+            break
         model.train()
         running = 0.0
         n_batches = 0

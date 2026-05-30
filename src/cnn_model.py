@@ -104,8 +104,8 @@ def _make_optimizer(name: str, params, lr: float, weight_decay: float = 0.0):
 
 
 def train_cnn(
-    X_train: np.ndarray,                  # [N, C, H, W] float32
-    y_train: np.ndarray,                  # [N] int64
+    X_train: np.ndarray,
+    y_train: np.ndarray,
     X_val: np.ndarray | None,
     y_val: np.ndarray | None,
     cfg: CNNTrainConfig,
@@ -113,6 +113,7 @@ def train_cnn(
     on_epoch: Callable[[CNNEpochStats], None] | None = None,
     existing_model: SimpleCNN | None = None,
     epoch_offset: int = 0,
+    should_stop: Callable[[], bool] | None = None,
 ) -> tuple[SimpleCNN, list[CNNEpochStats]]:
     """Тренирует CNN на картинках. Возвращает (модель, история)."""
     device = get_device(cfg.device)
@@ -149,6 +150,9 @@ def train_cnn(
     t0 = time.time()
 
     for epoch in range(1, cfg.epochs + 1):
+        if should_stop and should_stop():
+            print(f"[train CNN] остановлено пользователем на эпохе {epoch}")
+            break
         model.train()
         running, correct, total = 0.0, 0, 0
         for xb, yb in loader:

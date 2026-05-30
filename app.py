@@ -89,6 +89,12 @@ class AppState:
     hardware_info: hw.HardwareInfo | None = None
     last_benchmark: hw.BenchmarkResult | None = None
 
+    # === Stop-флаги для прерывания тренировки ===
+    # Worker-thread проверяет их между эпохами. True = остановиться мягко.
+    stop_text_training: bool = False
+    stop_nn_training: bool = False
+    stop_cnn_training: bool = False
+
     # === LoRA fine-tuning готовых LLM ===
     lora_base_key: str | None = None         # ключ из lora_finetune.CATALOG
     lora_dataset_path: str | None = None      # путь к .txt с ### Question/### Answer
@@ -768,6 +774,16 @@ class App:
             on_click=self._on_nn_save_click,
             visible=self.state.nn_model is not None,
         )
+        self.nn_stop_button = ft.OutlinedButton(
+            text="🛑 Стоп",
+            on_click=lambda e: (
+                setattr(self.state, "stop_nn_training", True),
+                setattr(self.train_status, "value", "🛑 Остановка..."),
+                self.page.update(),
+            ),
+            visible=False,
+            style=ft.ButtonStyle(color=self.c("danger")),
+        )
         self.train_progress = ft.ProgressBar(visible=False, width=400, color=self.c("acc"))
         self.train_status = ft.Text("Готово к старту", size=12, color=self.c("fg3"))
 
@@ -797,7 +813,8 @@ class App:
             ft.Container(height=14),
             advanced_section,
             ft.Container(height=14),
-            ft.Row([train_button, self.continue_button, self.save_button], spacing=12),
+            ft.Row([train_button, self.continue_button, self.save_button,
+                    self.nn_stop_button], spacing=12),
             self.train_progress,
             self.train_status,
             ft.Container(height=8),
@@ -1039,6 +1056,10 @@ class App:
             except Exception:
                 pass
 
+        # Сброс stop-флага + показываем stop-кнопку
+        self.state.stop_nn_training = False
+        self.nn_stop_button.visible = True
+
         def worker():
             try:
                 model, history = nn.train(
@@ -1046,6 +1067,7 @@ class App:
                     on_epoch=on_epoch,
                     existing_model=existing_model,
                     epoch_offset=epoch_offset,
+                    should_stop=lambda: self.state.stop_nn_training,
                 )
                 self.state.nn_model = model
                 self.state.nn_history.extend(history)
@@ -1063,6 +1085,8 @@ class App:
                 self.train_status.value = f"Ошибка обучения: {ex}"
             finally:
                 self.train_progress.visible = False
+                self.nn_stop_button.visible = False
+                self.state.stop_nn_training = False
                 try:
                     self.page.update()
                 except Exception:
@@ -1768,6 +1792,16 @@ class App:
             visible=self.state.cnn_model is not None,
             on_click=lambda e: self._snackbar("CNN-сохранение в следующей версии"),
         )
+        self.cnn_stop_button = ft.OutlinedButton(
+            text="🛑 Стоп",
+            on_click=lambda e: (
+                setattr(self.state, "stop_cnn_training", True),
+                setattr(self.cnn_train_status, "value", "🛑 Остановка..."),
+                self.page.update(),
+            ),
+            visible=False,
+            style=ft.ButtonStyle(color=self.c("danger")),
+        )
         self.cnn_train_progress = ft.ProgressBar(visible=False, width=400, color=t.acc)
         self.cnn_train_status = ft.Text("Готово к старту", size=12, color=t.fg3)
 
@@ -1795,7 +1829,7 @@ class App:
             epochs_label, epochs_slider,
             ft.Row([lr_dropdown, batch_dropdown, self._tip("learning_rate")], spacing=12),
             ft.Container(height=14),
-            ft.Row([train_btn, self.cnn_save_button], spacing=12),
+            ft.Row([train_btn, self.cnn_save_button, self.cnn_stop_button], spacing=12),
             self.cnn_train_progress,
             self.cnn_train_status,
             ft.Container(height=8),
@@ -1873,26 +1907,35 @@ class App:
             except Exception:
                 pass
 
+        # Сброс stop-флага + показываем stop-кнопку
+        self.state.stop_cnn_training = False
+        self.cnn_stop_button.visible = True
+
         def worker():
             try:
                 model, history = cm.train_cnn(
                     d.X_train, d.y_train, d.X_test, d.y_test,
                     cfg, num_classes=d.info.num_classes, on_epoch=on_epoch,
+                    should_stop=lambda: self.state.stop_cnn_training,
                 )
                 self.state.cnn_model = model
                 self.state.cnn_history = history
-                final = history[-1]
-                self.cnn_train_status.value = (
-                    f"Готово! Final train acc: {final.train_acc*100:.2f}% · "
-                    f"val acc: {(final.val_acc or 0)*100:.2f}% · "
-                    f"{final.elapsed_sec:.1f}с · "
-                    f"{model.count_params():,} параметров".replace(",", " ")
-                )
+                final = history[-1] if history else None
+                if final:
+                    prefix = "🛑 Остановлено!" if self.state.stop_cnn_training else "✅ Готово!"
+                    self.cnn_train_status.value = (
+                        f"{prefix} Final train acc: {final.train_acc*100:.2f}% · "
+                        f"val acc: {(final.val_acc or 0)*100:.2f}% · "
+                        f"{final.elapsed_sec:.1f}с · "
+                        f"{model.count_params():,} параметров".replace(",", " ")
+                    )
                 self.cnn_save_button.visible = True
             except Exception as ex:
                 self.cnn_train_status.value = f"Ошибка: {ex}"
             finally:
                 self.cnn_train_progress.visible = False
+                self.cnn_stop_button.visible = False
+                self.state.stop_cnn_training = False
                 try:
                     self.page.update()
                 except Exception:
@@ -2641,6 +2684,12 @@ class App:
             on_click=self._on_text_save_click,
             visible=self.state.text_model is not None,
         )
+        self.text_stop_button = ft.OutlinedButton(
+            text="🛑 Стоп",
+            on_click=self._on_text_stop_click,
+            visible=False,
+            style=ft.ButtonStyle(color=self.c("danger")),
+        )
         self.text_train_progress = ft.ProgressBar(visible=False, width=400, color=self.c("acc"))
         self.text_train_status = ft.Text("Готово к старту", size=12, color=self.c("fg3"))
         self.text_sample_box = ft.Container(
@@ -2679,7 +2728,8 @@ class App:
             ft.Container(height=10),
             text_advanced,
             ft.Container(height=14),
-            ft.Row([train_button, self.text_continue_button, self.text_save_button], spacing=12),
+            ft.Row([train_button, self.text_continue_button, self.text_save_button,
+                    self.text_stop_button], spacing=12),
             self.text_train_progress,
             self.text_train_status,
             ft.Container(height=8),
@@ -2822,6 +2872,13 @@ class App:
         self._show_text_train_step()
         self.page.update()
 
+    def _on_text_stop_click(self, e):
+        """Мягко остановить text-тренировку после текущей эпохи."""
+        self.state.stop_text_training = True
+        self.text_train_status.value = "🛑 Остановка после текущей эпохи..."
+        self.text_train_status.color = self.c("warning")
+        self.page.update()
+
     def _on_text_save_click(self, e):
         if self.state.text_model is None:
             self._snackbar("Нет обученной модели")
@@ -2842,6 +2899,9 @@ class App:
             self._snackbar(f"Ошибка сохранения: {ex}")
 
     def _run_text_training(self, existing_model: tm.CharLSTM | None):
+        # Сбрасываем stop-флаг при новом запуске + показываем stop-кнопку
+        self.state.stop_text_training = False
+        self.text_stop_button.visible = True
         is_continue = existing_model is not None
         if not is_continue:
             self.text_loss_chart.data_series[0].data_points = []
@@ -2924,31 +2984,41 @@ class App:
 
         def worker():
             try:
+                stop_check = lambda: self.state.stop_text_training
                 if is_transformer:
                     model, history = tform.train_transformer(
                         text, cfg, on_epoch=on_epoch,
                         existing_model=existing_model, epoch_offset=epoch_offset,
+                        should_stop=stop_check,
                     )
                 else:
                     model, history = tm.train_text(
                         text, cfg, on_epoch=on_epoch,
                         existing_model=existing_model, epoch_offset=epoch_offset,
+                        should_stop=stop_check,
                     )
                 self.state.text_model = model
                 self.state.text_history.extend(history)
-                final = history[-1]
-                self.text_train_status.value = (
-                    f"Готово! Финальный loss: {final.train_loss:.4f} · "
-                    f"всего эпох: {final.epoch} · {final.elapsed_sec:.1f}с · "
-                    f"параметров: {model.count_params():,}".replace(",", " ")
-                )
+                final = history[-1] if history else None
+                was_stopped = self.state.stop_text_training
+                if final:
+                    prefix = "🛑 Остановлено!" if was_stopped else "✅ Готово!"
+                    self.text_train_status.value = (
+                        f"{prefix} Финальный loss: {final.train_loss:.4f} · "
+                        f"всего эпох: {final.epoch} · {final.elapsed_sec:.1f}с · "
+                        f"параметров: {model.count_params():,}".replace(",", " ")
+                    )
+                    self.text_train_status.color = self.c("success")
                 self.text_continue_button.visible = True
                 self.text_continue_button.text = f"Дообучить ещё {self.state.text_epochs} эпох"
                 self.text_save_button.visible = True
             except Exception as ex:
                 self.text_train_status.value = f"Ошибка: {ex}"
+                self.text_train_status.color = self.c("danger")
             finally:
                 self.text_train_progress.visible = False
+                self.text_stop_button.visible = False
+                self.state.stop_text_training = False  # сброс на всякий
                 try:
                     self.page.update()
                 except Exception:
