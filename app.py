@@ -549,6 +549,36 @@ class App:
             self.loss_chart,
         ], scroll=ft.ScrollMode.AUTO)
 
+        # Восстанавливаем график/статус из истории — чтобы при переключении
+        # вкладок ничего не пропадало
+        self._restore_regression_train_view()
+
+    def _restore_regression_train_view(self):
+        """Перерисовать loss-график и статус из state.nn_history."""
+        history = self.state.nn_history
+        if not history:
+            return
+        max_loss = max(
+            max(s.train_loss for s in history),
+            max((s.val_loss or 0) for s in history),
+        ) * 1.1 or 1.0
+        last_epoch = history[-1].epoch
+        self.loss_chart.max_x = max(last_epoch, self.state.epochs)
+        self.loss_chart.data_series[0].data_points = [
+            ft.LineChartDataPoint(s.epoch, min(s.train_loss / max_loss, 1.0))
+            for s in history
+        ]
+        self.loss_chart.data_series[1].data_points = [
+            ft.LineChartDataPoint(s.epoch, min((s.val_loss or 0) / max_loss, 1.0))
+            for s in history if s.val_loss is not None
+        ]
+        final = history[-1]
+        self.train_status.value = (
+            f"Готово! Финальный train loss: {final.train_loss:.5f}"
+            + (f", val: {final.val_loss:.5f}" if final.val_loss is not None else "")
+            + f" · всего эпох: {final.epoch}"
+        )
+
     # === Обработчики слайдеров архитектуры ===
 
     @staticmethod
@@ -1337,6 +1367,38 @@ class App:
                     size=11, color="#8B8D93"),
             self.text_sample_box,
         ], scroll=ft.ScrollMode.AUTO)
+
+        # Восстанавливаем график/статус/образец из сохранённой истории —
+        # чтобы при переходе на другую вкладку и обратно ничего не пропадало.
+        self._restore_text_train_view()
+
+    def _restore_text_train_view(self):
+        """Перерисовать график loss и статус из state.text_history."""
+        history = self.state.text_history
+        if not history:
+            return
+
+        # Масштаб Y такой же как использовался во время тренировки
+        max_loss = max(s.train_loss for s in history) * 1.1 or 1.0
+        last_epoch = history[-1].epoch
+        self.text_loss_chart.max_x = max(last_epoch, self.state.text_epochs)
+        self.text_loss_chart.data_series[0].data_points = [
+            ft.LineChartDataPoint(s.epoch, min(s.train_loss / max_loss, 1.0))
+            for s in history
+        ]
+        final = history[-1]
+        if self.state.text_model is not None:
+            self.text_train_status.value = (
+                f"Готово! Финальный loss: {final.train_loss:.4f} · "
+                f"всего эпох: {final.epoch} · "
+                f"параметров: {self.state.text_model.count_params():,}".replace(",", " ")
+            )
+        # Последний образец генерации
+        if final.sample:
+            self.text_sample_box.content = ft.Text(
+                final.sample, size=12, color="#F2F3F5",
+                font_family="Consolas, monospace",
+            )
 
     @staticmethod
     def _count_text_params(vocab_size: int, embed_size: int,
