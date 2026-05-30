@@ -1,0 +1,26 @@
+# Mi-AiLab — настройки GitHub Linguist.
+# Цель: показать реальное разнообразие стека в статистике.
+
+# Markdown докум. — оставляем как есть (Linguist скрывает по умолчанию)
+# YAML в docs/examples/ ВКЛЮЧАЕМ в статистику (там реальные конфиги, не туториалы)
+docs/examples/*.yaml linguist-documentation=false
+docs/examples/*.yml  linguist-documentation=false
+
+# Линки на скрипты — это код, не доки
+scripts/*.py linguist-documentation=false
+
+# Тексты в data/texts/ — обучающие данные, НЕ исходники
+data/texts/*.txt linguist-detectable=false
+data/texts/*.txt linguist-generated=true
+
+# CSV-данные — тоже не код
+data/*.csv linguist-detectable=false
+
+# Нормализация переводов строк (Windows/Linux разный CRLF)
+* text=auto
+*.py text eol=lf
+*.md text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.json text eol=lf
+*.txt text eol=lf

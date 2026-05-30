@@ -1,0 +1,62 @@
+# Mi-AiLab CI: проверка что код собирается и базовые тесты работают.
+# Запускается на каждый push и PR в main.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12"]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # CPU-версия torch для CI (GPU-версия не нужна для проверки импортов)
+          pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+          pip install -r requirements.txt
+
+      - name: Check syntax of all Python files
+        run: |
+          python -c "import ast, pathlib; [ast.parse(p.read_text(encoding='utf-8')) for p in pathlib.Path('.').rglob('*.py') if '.venv' not in str(p)]; print('All .py files parse OK')"
+
+      - name: Verify imports
+        run: |
+          python -c "
+          from src import theme, datasets, neural_net, text_datasets, text_model
+          from src import hardware, model_storage, cnn_model, image_datasets
+          from src import bpe_tokenizer, streaming_dataset, transformer_model
+          from src import instruction_datasets, lora_finetune, tooltips
+          print('All src modules import OK')
+          "
+
+      - name: Test dataset generators
+        run: |
+          python mi.py
+          python scripts/generate_vpn_qa.py
+          python scripts/combine_datasets.py
+          ls -la data/texts/
+
+      - name: Smoke-test CLI
+        run: |
+          python cli.py --help
+          python cli.py hardware
+          python cli.py list-corpora
+          python cli.py lora-finetune --list
