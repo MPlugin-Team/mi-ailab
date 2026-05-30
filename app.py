@@ -25,6 +25,7 @@ from src import neural_net as nn
 from src import text_datasets as tds
 from src import text_model as tm
 from src import hardware as hw
+from src import theme as theme_mod
 
 
 # === Общее состояние приложения ===
@@ -34,6 +35,10 @@ class AppState:
     """Шарится между экранами через App.state."""
     # Активный режим: "hardware" | "regression" | "text"
     mode: str = "hardware"
+
+    # === Дизайн-система ===
+    theme_mode: str = "dark"     # "dark" | "light"
+    accent: str = "cyan"          # см. theme.ACCENTS — cyan/violet/green/amber/rose
 
     # Глобальный выбор устройства — применяется к обоим режимам тренировки
     device: str = "auto"   # "auto" | "cpu" | "cuda"
@@ -87,38 +92,75 @@ class App:
         page.window.min_width = 900
         page.window.min_height = 580
         page.theme_mode = ft.ThemeMode.DARK
-        page.bgcolor = "#1E1F22"          # Discord-ish dark
+        page.bgcolor = self.t.bg0
         page.padding = 0
 
         self.current_step = 0
-
         self.content_panel = ft.Container(expand=True, padding=24)
 
-        # Mode tabs (Регрессия / Текст) — сверху сайдбара
-        self.mode_tabs_container = ft.Column(spacing=4)
-        self.steps_container = ft.Column(spacing=4)
+        # Mode tabs + steps + footer (тема/акцент) — пересобираются при переключении
+        self.mode_tabs_container = ft.Column(spacing=2)
+        self.steps_container = ft.Column(spacing=2)
+        self.sidebar_footer = ft.Column(spacing=8)
         self._rebuild_sidebar()
 
-        sidebar = ft.Container(
-            width=210,
-            bgcolor="#232428",
-            padding=16,
-            content=ft.Column([
-                ft.Container(height=8),
-                ft.Text("Mi-AiLab", size=18, weight=ft.FontWeight.W_600, color="#F2F3F5"),
-                ft.Text("by Mi-PluginTeam", size=11, color="#5A5C63"),
-                ft.Container(height=16),
-                ft.Text("РЕЖИМ", size=10, color="#5A5C63", weight=ft.FontWeight.W_600),
-                self.mode_tabs_container,
-                ft.Container(height=14),
-                ft.Text("ШАГИ", size=10, color="#5A5C63", weight=ft.FontWeight.W_600),
-                self.steps_container,
-            ], spacing=4),
-        )
-
-        page.add(ft.Row([sidebar, self.content_panel], expand=True, spacing=0))
+        self.sidebar = self._build_sidebar()
+        page.add(ft.Row([self.sidebar, self.content_panel], expand=True, spacing=0))
         self._show_current_step()
-        page.update()   # без этого content_panel не отрендерится при старте
+        page.update()
+
+    @property
+    def t(self) -> theme_mod.Theme:
+        """Текущая тема — короткий доступ. Пересоздаётся каждый раз чтобы
+        отражать актуальный state.theme_mode/accent. Дёшево (просто dict→dataclass)."""
+        return theme_mod.current(self.state.theme_mode, self.state.accent)
+
+    def c(self, token: str) -> str:
+        """Шорткат к цвету темы по строковому ключу. Используется в виджетах."""
+        return getattr(self.t, token)
+
+    def _build_sidebar(self) -> ft.Container:
+        t = self.t
+        return ft.Container(
+            width=210,
+            bgcolor=t.bg1,
+            border=ft.border.only(right=ft.BorderSide(1, t.line1)),
+            padding=ft.padding.only(top=8),
+            content=ft.Column([
+                # Brand
+                ft.Container(
+                    padding=ft.padding.symmetric(horizontal=16, vertical=14),
+                    content=ft.Row([
+                        ft.Container(
+                            width=22, height=22, border_radius=6, bgcolor=t.acc,
+                            content=ft.Text("M", size=14, weight=ft.FontWeight.W_700,
+                                            color=t.bg0),
+                            alignment=ft.alignment.center,
+                        ),
+                        ft.Text("Mi-", size=15, weight=ft.FontWeight.W_600, color=t.fg1,
+                                spans=[ft.TextSpan("AiLab",
+                                       ft.TextStyle(color=t.acc, weight=ft.FontWeight.W_600))]),
+                    ], spacing=8),
+                ),
+                # Modes section
+                ft.Container(
+                    padding=ft.padding.only(left=18, top=8, bottom=4),
+                    content=ft.Text("РЕЖИМЫ", size=10, color=t.fg3,
+                                    weight=ft.FontWeight.W_600),
+                ),
+                self.mode_tabs_container,
+                # Steps section (header только если есть шаги — для hardware нет)
+                ft.Container(
+                    padding=ft.padding.only(left=18, top=14, bottom=4),
+                    content=ft.Text("ШАГИ", size=10, color=t.fg3,
+                                    weight=ft.FontWeight.W_600),
+                ),
+                self.steps_container,
+                # Footer — растянуть на остаток высоты
+                ft.Container(expand=True),
+                self.sidebar_footer,
+            ], spacing=0, expand=True),
+        )
 
     # === Сайдбар ===
 
@@ -140,27 +182,116 @@ class App:
         ]
 
     def _rebuild_sidebar(self):
+        t = self.t
         # Mode tabs
         self.mode_tabs_container.controls = [
-            self._mode_tab("hardware", "🖥️ Моя машина"),
-            self._mode_tab("regression", "📊 Регрессия"),
-            self._mode_tab("text", "📝 Текст (LSTM)"),
+            self._mode_tab("hardware",   "Моя машина", "железо", ft.icons.MEMORY),
+            self._mode_tab("regression", "Регрессия",  "MLP",   ft.icons.SHOW_CHART),
+            self._mode_tab("text",       "Текст",      "LSTM",  ft.icons.TEXT_FIELDS),
         ]
         # Step buttons
         self.steps_container.controls = [
             self._step_button(i, str(i + 1), label)
             for i, (label, _) in enumerate(self._steps_for_mode)
         ]
+        # Footer: палитра акцентов + переключатель темы
+        accent_buttons = []
+        for key, name, hex_color in theme_mod.accent_options():
+            is_active = self.state.accent == key
+            accent_buttons.append(ft.Container(
+                width=22, height=22, border_radius=11,
+                bgcolor=hex_color,
+                border=ft.border.all(2, t.fg1 if is_active else "#00000000"),
+                tooltip=name,
+                on_click=lambda e, k=key: self._switch_accent(k),
+                ink=True,
+            ))
+        is_light = self.state.theme_mode == "light"
+        theme_toggle = ft.Container(
+            padding=ft.padding.symmetric(horizontal=10, vertical=8),
+            border_radius=6,
+            border=ft.border.all(1, t.line1),
+            bgcolor=t.bg2,
+            content=ft.Row([
+                ft.Icon(ft.icons.LIGHT_MODE if is_light else ft.icons.DARK_MODE,
+                        size=14, color=t.fg2),
+                ft.Text("Светлая" if is_light else "Тёмная",
+                        size=12, color=t.fg2, expand=True),
+                ft.Container(
+                    width=28, height=16, border_radius=8,
+                    bgcolor=t.acc_soft if is_light else t.bg3,
+                    border=ft.border.all(1, t.acc if is_light else t.line2),
+                    content=ft.Container(
+                        width=12, height=12, border_radius=6,
+                        bgcolor=t.acc if is_light else t.fg3,
+                        margin=ft.margin.only(
+                            left=14 if is_light else 1, top=1,
+                        ),
+                    ),
+                ),
+            ], spacing=8),
+            on_click=lambda e: self._toggle_theme(),
+            ink=True,
+        )
+        self.sidebar_footer.controls = [
+            ft.Container(
+                padding=ft.padding.only(left=16, right=16, top=8, bottom=4),
+                content=ft.Text("АКЦЕНТ", size=10, color=t.fg3,
+                                weight=ft.FontWeight.W_600),
+            ),
+            ft.Container(
+                padding=ft.padding.only(left=16, right=16, bottom=10),
+                content=ft.Row(accent_buttons, spacing=8, wrap=True),
+            ),
+            ft.Divider(height=1, color=t.line1),
+            ft.Container(padding=10, content=theme_toggle),
+        ]
 
-    def _mode_tab(self, mode_key: str, label: str) -> ft.Container:
+    def _switch_accent(self, key: str):
+        self.state.accent = key
+        self._refresh_all()
+
+    def _toggle_theme(self):
+        self.state.theme_mode = "light" if self.state.theme_mode == "dark" else "dark"
+        self._refresh_all()
+
+    def _refresh_all(self):
+        """Полная перерисовка после смены темы/акцента."""
+        self.page.bgcolor = self.t.bg0
+        # Пересобираем sidebar (новые цвета)
+        new_sidebar = self._build_sidebar()
+        # Заменяем в Row
+        row = self.page.controls[0]
+        row.controls[0] = new_sidebar
+        self.sidebar = new_sidebar
+        self._rebuild_sidebar()
+        # Перерисовываем текущий экран — это применит новые цвета ко всем виджетам
+        self._show_current_step()
+        self.page.update()
+
+    def _mode_tab(self, mode_key: str, label: str,
+                  badge: str, icon: str) -> ft.Container:
         active = self.state.mode == mode_key
+        t = self.t
         return ft.Container(
-            padding=ft.padding.symmetric(horizontal=12, vertical=8),
-            border_radius=8,
-            bgcolor="#2B00E5FF" if active else None,
-            content=ft.Text(label, size=12,
-                            color="#00E5FF" if active else "#8B8D93",
-                            weight=ft.FontWeight.W_500),
+            padding=ft.padding.symmetric(horizontal=11, vertical=8),
+            margin=ft.margin.symmetric(horizontal=8, vertical=1),
+            border_radius=6,
+            bgcolor=t.acc_soft if active else None,
+            content=ft.Row([
+                ft.Icon(icon, size=16, color=t.acc if active else t.fg2),
+                ft.Text(label, size=13,
+                        color=t.acc if active else t.fg2,
+                        weight=ft.FontWeight.W_500, expand=True),
+                ft.Container(
+                    padding=ft.padding.symmetric(horizontal=5, vertical=2),
+                    border_radius=2,
+                    bgcolor=t.acc_soft if active else t.bg3,
+                    content=ft.Text(badge.upper(), size=9, color=t.acc if active else t.fg3,
+                                    weight=ft.FontWeight.W_600,
+                                    font_family="Consolas, monospace"),
+                ),
+            ], spacing=10),
             on_click=lambda e, k=mode_key: self._switch_mode(k),
             ink=True,
         )
@@ -176,21 +307,30 @@ class App:
 
     def _step_button(self, idx: int, num: str, label: str) -> ft.Container:
         active = idx == self.current_step
+        done = idx < self.current_step
+        t = self.t
+        if active:
+            num_bg, num_fg = t.acc, t.bg0
+        elif done:
+            num_bg, num_fg = t.acc_soft, t.acc
+        else:
+            num_bg, num_fg = t.bg1, t.fg3
         return ft.Container(
-            padding=ft.padding.symmetric(horizontal=12, vertical=10),
-            border_radius=10,
-            bgcolor="#2B00E5FF" if active else None,
+            padding=ft.padding.symmetric(horizontal=10, vertical=6),
+            margin=ft.margin.only(left=22, right=10, top=1, bottom=1),
+            border_radius=6,
             content=ft.Row([
                 ft.Container(
-                    width=22, height=22,
-                    border_radius=11,
-                    bgcolor="#00E5FF" if active else "#2B2D31",
-                    content=ft.Text(num, size=12, weight=ft.FontWeight.W_600,
-                                    color="#051518" if active else "#8B8D93"),
+                    width=18, height=18, border_radius=9,
+                    bgcolor=num_bg,
+                    border=ft.border.all(1, t.acc if active or done else t.line2),
+                    content=ft.Text(num, size=10, weight=ft.FontWeight.W_600,
+                                    color=num_fg,
+                                    font_family="Consolas, monospace"),
                     alignment=ft.alignment.center,
                 ),
-                ft.Text(label, size=13,
-                        color="#F2F3F5" if active else "#8B8D93",
+                ft.Text(label, size=12,
+                        color=t.fg1 if active or done else t.fg3,
                         weight=ft.FontWeight.W_500 if active else ft.FontWeight.W_400),
             ], spacing=10),
             on_click=lambda e, i=idx: self._goto_step(i),
@@ -241,9 +381,9 @@ class App:
             items.append(self._dataset_card(info))
 
         self.content_panel.content = ft.Column([
-            ft.Text("Выбери датасет", size=24, weight=ft.FontWeight.W_500, color="#F2F3F5"),
+            ft.Text("Выбери датасет", size=24, weight=ft.FontWeight.W_500, color=self.c("fg1")),
             ft.Text("Встроенные классические датасеты или загрузи свой CSV.",
-                    size=13, color="#8B8D93"),
+                    size=13, color=self.c("fg3")),
             ft.Container(height=20),
             ft.Column(items, spacing=10),
             ft.Container(height=20),
@@ -261,20 +401,20 @@ class App:
             border_radius=12,
             border=ft.border.all(
                 1,
-                "#00E5FF" if selected else "#2B2D31",
+                self.c("acc") if selected else self.c("line2"),
             ),
-            bgcolor="#2B00E5FF" if selected else "#232428",
+            bgcolor=self.c("acc_soft") if selected else self.c("bg2"),
             content=ft.Column([
                 ft.Row([
-                    ft.Text(info.title, size=15, weight=ft.FontWeight.W_600, color="#F2F3F5"),
+                    ft.Text(info.title, size=15, weight=ft.FontWeight.W_600, color=self.c("fg1")),
                     ft.Container(
                         padding=ft.padding.symmetric(horizontal=8, vertical=2),
                         border_radius=10,
-                        bgcolor="#2B2D31",
-                        content=ft.Text(info.task_type, size=10, color="#8B8D93"),
+                        bgcolor=self.c("line2"),
+                        content=ft.Text(info.task_type, size=10, color=self.c("fg3")),
                     ),
                 ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
-                ft.Text(info.description, size=12, color="#8B8D93"),
+                ft.Text(info.description, size=12, color=self.c("fg3")),
             ], spacing=6),
             on_click=lambda e, i=info: self._on_dataset_selected(i),
             ink=True,
@@ -344,7 +484,7 @@ class App:
         current_dropout = getattr(self.state, dropout_state_attr)
         dropout_label = ft.Text(
             f"Dropout: {current_dropout:.2f}  (0 = выключен, 0.5 = сильный)",
-            size=12, color="#F2F3F5",
+            size=12, color=self.c("fg1"),
         )
         def _on_dropout(e):
             v = round(float(e.control.value), 2)
@@ -355,7 +495,7 @@ class App:
             self.page.update()
         dropout_slider = ft.Slider(
             min=0.0, max=0.5, divisions=10, value=current_dropout,
-            active_color="#00E5FF", inactive_color="#2B2D31", width=400,
+            active_color=self.c("acc"), inactive_color=self.c("line2"), width=400,
             on_change=_on_dropout,
         )
 
@@ -383,20 +523,20 @@ class App:
 
         return ft.ExpansionTile(
             title=ft.Text("⚙️ Расширенные настройки", size=13,
-                          weight=ft.FontWeight.W_500, color="#F2F3F5"),
+                          weight=ft.FontWeight.W_500, color=self.c("fg1")),
             subtitle=ft.Text("device, optimizer, dropout, weight decay",
-                             size=10, color="#8B8D93"),
+                             size=10, color=self.c("fg3")),
             controls=[ft.Container(padding=12, content=ft.Column(controls, spacing=6))],
             initially_expanded=False,
-            bgcolor="#1A1B1E",
-            collapsed_bgcolor="#1A1B1E",
-            text_color="#F2F3F5",
-            icon_color="#00E5FF",
+            bgcolor=self.c("bg1"),
+            collapsed_bgcolor=self.c("bg1"),
+            text_color=self.c("fg1"),
+            icon_color=self.c("acc"),
         )
 
     def _show_train_step(self):
         if self.state.dataset is None:
-            self.content_panel.content = ft.Text("Сначала выбери датасет", color="#8B8D93")
+            self.content_panel.content = ft.Text("Сначала выбери датасет", color=self.c("fg3"))
             return
 
         # === Архитектура: список размеров скрытых слоёв ===
@@ -407,37 +547,37 @@ class App:
         ) if self.state.dataset is not None else 0
 
         layers_label = ft.Text(f"Архитектура: {self.state.hidden_layers}",
-                               size=12, color="#F2F3F5")
+                               size=12, color=self.c("fg1"))
         self.params_label = ft.Text(
             f"≈ {self._count_params(n_features, self.state.hidden_layers):,} параметров".replace(",", " "),
-            size=12, color="#00E5FF", weight=ft.FontWeight.W_500,
+            size=12, color=self.c("acc"), weight=ft.FontWeight.W_500,
         )
 
         layers_count_slider = ft.Slider(
             min=1, max=10, divisions=9, value=len(self.state.hidden_layers),
             label="{value} скрытых слоёв",
-            active_color="#00E5FF", inactive_color="#2B2D31", width=400,
+            active_color=self.c("acc"), inactive_color=self.c("line2"), width=400,
             on_change=lambda e: self._on_layers_count_changed(
                 int(e.control.value), layers_label, n_features),
         )
         layer_size_slider = ft.Slider(
             min=4, max=1024, divisions=255, value=self.state.hidden_layers[0],
             label="нейронов на слой: {value}",
-            active_color="#00E5FF", inactive_color="#2B2D31", width=400,
+            active_color=self.c("acc"), inactive_color=self.c("line2"), width=400,
             on_change=lambda e: self._on_layer_size_changed(
                 int(e.control.value), layers_label, n_features),
         )
 
         # === Гиперпараметры тренировки ===
-        epochs_label = ft.Text(f"Эпох: {self.state.epochs}", size=12, color="#F2F3F5")
+        epochs_label = ft.Text(f"Эпох: {self.state.epochs}", size=12, color=self.c("fg1"))
         epochs_slider = ft.Slider(
             min=10, max=5000, divisions=499, value=self.state.epochs,
-            active_color="#00E5FF", inactive_color="#2B2D31", width=400,
+            active_color=self.c("acc"), inactive_color=self.c("line2"), width=400,
             on_change=lambda e: self._on_epochs_changed(int(e.control.value), epochs_label),
         )
 
         lr_label = ft.Text(f"Learning rate: {self.state.learning_rate}",
-                           size=12, color="#F2F3F5")
+                           size=12, color=self.c("fg1"))
         lr_dropdown = ft.Dropdown(
             label="learning rate", value=str(self.state.learning_rate),
             options=[ft.dropdown.Option(v) for v in
@@ -456,13 +596,13 @@ class App:
         normalize_switch = ft.Switch(
             label="Нормализация (X и y → среднее 0, std 1) — почти всегда улучшает точность",
             value=self.state.normalize,
-            active_color="#00E5FF",
+            active_color=self.c("acc"),
             on_change=lambda e: self._on_normalize_changed(e.control.value),
         )
         lr_schedule_switch = ft.Switch(
             label="LR scheduler (CosineAnnealing) — плавно снижает lr к концу обучения",
             value=self.state.lr_schedule,
-            active_color="#00E5FF",
+            active_color=self.c("acc"),
             on_change=lambda e: self._on_lr_schedule_changed(e.control.value),
         )
 
@@ -480,36 +620,36 @@ class App:
         # Y-ось логарифмическая по факту: масштабируем сами после первой пары эпох
         self.loss_chart = ft.LineChart(
             data_series=[
-                ft.LineChartData(data_points=[], color="#00E5FF",
+                ft.LineChartData(data_points=[], color=self.c("acc"),
                                  stroke_width=2, curved=False),
-                ft.LineChartData(data_points=[], color="#F2B05E",
+                ft.LineChartData(data_points=[], color=self.c("warning"),
                                  stroke_width=2, curved=False),
             ],
-            border=ft.border.all(1, "#2B2D31"),
-            horizontal_grid_lines=ft.ChartGridLines(interval=0.2, width=1, color="#2B2D31"),
-            vertical_grid_lines=ft.ChartGridLines(width=1, color="#2B2D31"),
+            border=ft.border.all(1, self.c("line2")),
+            horizontal_grid_lines=ft.ChartGridLines(interval=0.2, width=1, color=self.c("line2")),
+            vertical_grid_lines=ft.ChartGridLines(width=1, color=self.c("line2")),
             left_axis=ft.ChartAxis(
                 labels_size=60,
                 labels_interval=0.2,
-                title=ft.Text("loss (норм.)", color="#8B8D93", size=10),
+                title=ft.Text("loss (норм.)", color=self.c("fg3"), size=10),
                 title_size=20,
             ),
             bottom_axis=ft.ChartAxis(
                 labels_size=20,
-                title=ft.Text("эпоха", color="#8B8D93", size=10),
+                title=ft.Text("эпоха", color=self.c("fg3"), size=10),
                 title_size=14,
             ),
             min_x=0, max_x=self.state.epochs,
             min_y=0, max_y=1,
             expand=True, height=280,
-            tooltip_bgcolor="#0E0E11",
+            tooltip_bgcolor=self.c("chart_bg"),
         )
 
         # === Кнопки + статус ===
         train_button = ft.FilledButton(
             text="Старт обучения", icon=ft.icons.PLAY_ARROW,
             on_click=self._on_nn_train_click,
-            style=ft.ButtonStyle(bgcolor="#00E5FF", color="#051518"),
+            style=ft.ButtonStyle(bgcolor=self.c("acc"), color=self.c("bg0")),
         )
         # Кнопка «Дообучить» видна только если есть уже обученная модель.
         # Не сбрасывает веса — продолжает с того места где остановилась модель.
@@ -519,20 +659,20 @@ class App:
             on_click=self._on_nn_continue_click,
             visible=self.state.nn_model is not None,
         )
-        self.train_progress = ft.ProgressBar(visible=False, width=400, color="#00E5FF")
-        self.train_status = ft.Text("Готово к старту", size=12, color="#8B8D93")
+        self.train_progress = ft.ProgressBar(visible=False, width=400, color=self.c("acc"))
+        self.train_status = ft.Text("Готово к старту", size=12, color=self.c("fg3"))
 
         self.content_panel.content = ft.Column([
-            ft.Text("Своя нейросеть", size=24, weight=ft.FontWeight.W_500, color="#F2F3F5"),
+            ft.Text("Своя нейросеть", size=24, weight=ft.FontWeight.W_500, color=self.c("fg1")),
             ft.Text(f"Датасет: {self.state.dataset.info.title} · target: {self.state.target_column}",
-                    size=12, color="#8B8D93"),
+                    size=12, color=self.c("fg3")),
             ft.Container(height=14),
-            ft.Text("Архитектура", size=13, weight=ft.FontWeight.W_500, color="#F2F3F5"),
+            ft.Text("Архитектура", size=13, weight=ft.FontWeight.W_500, color=self.c("fg1")),
             ft.Row([layers_label, self.params_label], spacing=20),
             layers_count_slider,
             layer_size_slider,
             ft.Container(height=14),
-            ft.Text("Гиперпараметры", size=13, weight=ft.FontWeight.W_500, color="#F2F3F5"),
+            ft.Text("Гиперпараметры", size=13, weight=ft.FontWeight.W_500, color=self.c("fg1")),
             epochs_label, epochs_slider,
             ft.Row([lr_dropdown, batch_dropdown], spacing=12),
             normalize_switch,
@@ -545,7 +685,7 @@ class App:
             self.train_status,
             ft.Container(height=8),
             ft.Text("Loss по эпохам (голубой = train, оранжевый = val)",
-                    size=11, color="#8B8D93"),
+                    size=11, color=self.c("fg3")),
             self.loss_chart,
         ], scroll=ft.ScrollMode.AUTO)
 
@@ -768,7 +908,7 @@ class App:
     def _show_test_step(self):
         if self.state.nn_model is None:
             self.content_panel.content = ft.Text(
-                "Сначала обучи модель в шаге «Тренировка»", color="#8B8D93")
+                "Сначала обучи модель в шаге «Тренировка»", color=self.c("fg3"))
             return
 
         df = self.state.dataset.df
@@ -792,11 +932,11 @@ class App:
         sample_df = df.sample(n=min(10, len(df)), random_state=42).reset_index(drop=True)
 
         header_cells = [
-            ft.DataColumn(ft.Text(c, size=11, color="#F2F3F5", weight=ft.FontWeight.W_600))
+            ft.DataColumn(ft.Text(c, size=11, color=self.c("fg1"), weight=ft.FontWeight.W_600))
             for c in feature_cols
         ] + [
             ft.DataColumn(ft.Text(f"{target_col} (правильный ответ)",
-                                  size=11, color="#00E5FF", weight=ft.FontWeight.W_600))
+                                  size=11, color=self.c("acc"), weight=ft.FontWeight.W_600))
         ]
 
         choices_meta = self.state.dataset.info.feature_choices or {}
@@ -818,25 +958,25 @@ class App:
 
         sample_rows = []
         for _, row in sample_df.iterrows():
-            cells = [ft.DataCell(ft.Text(fmt_cell(c, row[c]), size=11, color="#F2F3F5"))
+            cells = [ft.DataCell(ft.Text(fmt_cell(c, row[c]), size=11, color=self.c("fg1")))
                      for c in feature_cols]
             cells.append(ft.DataCell(ft.Text(fmt(row[target_col]),
-                                             size=11, color="#00E5FF",
+                                             size=11, color=self.c("acc"),
                                              weight=ft.FontWeight.W_600)))
             sample_rows.append(ft.DataRow(cells=cells))
 
         sample_table = ft.Container(
             content=ft.DataTable(
                 columns=header_cells, rows=sample_rows,
-                heading_row_color="#232428",
+                heading_row_color=self.c("bg2"),
                 heading_row_height=36, data_row_min_height=30, data_row_max_height=36,
                 column_spacing=24,
                 divider_thickness=0.5,
             ),
-            border=ft.border.all(1, "#2B2D31"),
+            border=ft.border.all(1, self.c("line2")),
             border_radius=8,
             padding=10,
-            bgcolor="#1A1B1E",
+            bgcolor=self.c("bg1"),
         )
 
         # === Поля ввода ===
@@ -852,7 +992,7 @@ class App:
                     value=str(next(iter(choices))),  # дефолт — первое значение
                     options=[ft.dropdown.Option(key=str(k), text=label)
                              for k, label in choices.items()],
-                    border_color="#2B2D31", focused_border_color="#00E5FF",
+                    border_color=self.c("line2"), focused_border_color=self.c("acc"),
                 )
                 inputs[col] = dd
             else:
@@ -860,12 +1000,12 @@ class App:
                 sample = str(sample_series.iloc[0]) if len(sample_series) else "0"
                 tf = ft.TextField(
                     label=col, value=sample, width=180, dense=True,
-                    border_color="#2B2D31", focused_border_color="#00E5FF",
+                    border_color=self.c("line2"), focused_border_color=self.c("acc"),
                 )
                 inputs[col] = tf
 
-        prediction_text = ft.Text("", size=22, weight=ft.FontWeight.W_600, color="#00E5FF")
-        expected_text = ft.Text("", size=13, color="#8B8D93")
+        prediction_text = ft.Text("", size=22, weight=ft.FontWeight.W_600, color=self.c("acc"))
+        expected_text = ft.Text("", size=13, color=self.c("fg3"))
         accuracy_text = ft.Text("", size=13)
 
         # === Кнопки ===
@@ -881,7 +1021,7 @@ class App:
             expected_text.value = f"Реальный ответ из датасета: {expected_ref['val']:.4f}"
             prediction_text.value = ""
             accuracy_text.value = "Нажми «Предсказать» чтобы сравнить"
-            accuracy_text.color = "#8B8D93"
+            accuracy_text.color = self.c("fg3")
             self.page.update()
 
         def on_predict(e):
@@ -909,16 +1049,16 @@ class App:
                            "плохо — модель недообучена")
                     )
                     accuracy_text.color = (
-                        "#3FBE6E" if err_pct < 5 else
-                        "#F2B05E" if err_pct < 20 else
-                        "#E5484D"
+                        self.c("success") if err_pct < 5 else
+                        self.c("warning") if err_pct < 20 else
+                        self.c("danger")
                     )
                 else:
                     expected_text.value = "(нажми «Случайный пример» чтобы увидеть сравнение)"
                     accuracy_text.value = ""
             except Exception as ex:
                 prediction_text.value = f"Ошибка: {ex}"
-                prediction_text.color = "#E5484D"
+                prediction_text.color = self.c("danger")
             self.page.update()
 
         random_button = ft.OutlinedButton(
@@ -927,27 +1067,27 @@ class App:
         )
         predict_button = ft.FilledButton(
             text="Предсказать", icon=ft.icons.SCIENCE, on_click=on_predict,
-            style=ft.ButtonStyle(bgcolor="#00E5FF", color="#051518"),
+            style=ft.ButtonStyle(bgcolor=self.c("acc"), color=self.c("bg0")),
         )
 
         self.content_panel.content = ft.Column([
-            ft.Text("Тест нейросети", size=24, weight=ft.FontWeight.W_500, color="#F2F3F5"),
+            ft.Text("Тест нейросети", size=24, weight=ft.FontWeight.W_500, color=self.c("fg1")),
             ft.Text(f"Датасет: {self.state.dataset.info.title} · "
                     f"предсказываем «{target_col}»",
-                    size=12, color="#8B8D93"),
+                    size=12, color=self.c("fg3")),
             ft.Container(height=14),
 
             ft.Text("Примеры из обучающего датасета (10 случайных строк)",
-                    size=13, weight=ft.FontWeight.W_500, color="#F2F3F5"),
+                    size=13, weight=ft.FontWeight.W_500, color=self.c("fg1")),
             ft.Text("Смотри какие значения бывают на входе и какой к ним правильный ответ. "
                     "Скопируй любую строку в поля ниже — или нажми «Случайный пример».",
-                    size=11, color="#8B8D93"),
+                    size=11, color=self.c("fg3")),
             ft.Container(height=8),
             sample_table,
             ft.Container(height=20),
 
             ft.Text("Введи значения признаков", size=13, weight=ft.FontWeight.W_500,
-                    color="#F2F3F5"),
+                    color=self.c("fg1")),
             ft.Row(list(inputs.values()), spacing=10, wrap=True),
             ft.Container(height=10),
             ft.Row([random_button, predict_button], spacing=10),
@@ -956,8 +1096,8 @@ class App:
             ft.Container(
                 padding=14,
                 border_radius=10,
-                border=ft.border.all(1, "#2B2D31"),
-                bgcolor="#232428",
+                border=ft.border.all(1, self.c("line2")),
+                bgcolor=self.c("bg2"),
                 content=ft.Column([
                     prediction_text,
                     expected_text,
@@ -977,18 +1117,18 @@ class App:
 
         # === Карточки железа ===
         def info_card(title: str, lines: list[tuple[str, str]],
-                      accent: str = "#00E5FF") -> ft.Container:
+                      accent: str = self.c("acc")) -> ft.Container:
             rows = []
             for label, value in lines:
                 rows.append(ft.Row([
-                    ft.Text(label, size=12, color="#8B8D93", width=130, no_wrap=True),
-                    ft.Text(value, size=13, color="#F2F3F5",
+                    ft.Text(label, size=12, color=self.c("fg3"), width=130, no_wrap=True),
+                    ft.Text(value, size=13, color=self.c("fg1"),
                             weight=ft.FontWeight.W_500, selectable=True,
                             expand=True),     # значение занимает остаток и переносится
                 ], spacing=8, vertical_alignment=ft.CrossAxisAlignment.START))
             return ft.Container(
                 padding=16, border_radius=12,
-                border=ft.border.all(1, "#2B2D31"), bgcolor="#232428",
+                border=ft.border.all(1, self.c("line2")), bgcolor=self.c("bg2"),
                 content=ft.Column([
                     ft.Text(title, size=14, weight=ft.FontWeight.W_600, color=accent),
                     ft.Container(height=8),
@@ -1016,7 +1156,7 @@ class App:
                 ("GPU count", str(info.gpu_count)),
                 ("Доступно для тренировки", "✅ ДА"),
             ]
-            gpu_accent = "#3FBE6E"
+            gpu_accent = self.c("success")
         else:
             gpu_lines = [
                 ("GPU", "не обнаружено или PyTorch собран без CUDA"),
@@ -1024,7 +1164,7 @@ class App:
                 ("Доступно для тренировки", "❌ только CPU"),
                 ("Совет", "pip install torch --index-url https://download.pytorch.org/whl/cu121"),
             ]
-            gpu_accent = "#E5A23E"
+            gpu_accent = self.c("warning")
         gpu_card = info_card("🎮 GPU", gpu_lines, accent=gpu_accent)
 
         # === Глобальный выбор устройства ===
@@ -1043,60 +1183,60 @@ class App:
         # === Бенчмарк ===
         self.bench_button = ft.FilledButton(
             text="Запустить бенчмарк", icon=ft.icons.SPEED,
-            style=ft.ButtonStyle(bgcolor="#00E5FF", color="#051518"),
+            style=ft.ButtonStyle(bgcolor=self.c("acc"), color=self.c("bg0")),
             on_click=self._on_benchmark_click,
         )
-        self.bench_progress = ft.ProgressBar(visible=False, width=400, color="#00E5FF")
+        self.bench_progress = ft.ProgressBar(visible=False, width=400, color=self.c("acc"))
         self.bench_result_box = ft.Container(
             padding=14, border_radius=10,
-            border=ft.border.all(1, "#2B2D31"), bgcolor="#1A1B1E",
+            border=ft.border.all(1, self.c("line2")), bgcolor=self.c("bg1"),
             content=self._render_bench_result(self.state.last_benchmark),
         )
 
         # === Рекомендации ===
         rec_rows = [
-            ft.Row([ft.Text("Тип модели", size=11, color="#8B8D93", width=200),
-                    ft.Text("Макс. параметров (рекомендуется)", size=11, color="#8B8D93")]),
-            ft.Divider(height=1, color="#2B2D31"),
-            ft.Row([ft.Text("MLP (регрессия)", size=12, color="#F2F3F5", width=200),
+            ft.Row([ft.Text("Тип модели", size=11, color=self.c("fg3"), width=200),
+                    ft.Text("Макс. параметров (рекомендуется)", size=11, color=self.c("fg3"))]),
+            ft.Divider(height=1, color=self.c("line2")),
+            ft.Row([ft.Text("MLP (регрессия)", size=12, color=self.c("fg1"), width=200),
                     ft.Text(f"≈ {recs.max_mlp_params:,}".replace(",", " "),
-                            size=12, color="#00E5FF")]),
-            ft.Row([ft.Text("LSTM (текст)", size=12, color="#F2F3F5", width=200),
+                            size=12, color=self.c("acc"))]),
+            ft.Row([ft.Text("LSTM (текст)", size=12, color=self.c("fg1"), width=200),
                     ft.Text(f"≈ {recs.max_lstm_params:,}".replace(",", " "),
-                            size=12, color="#00E5FF")]),
-            ft.Row([ft.Text("CNN (картинки)", size=12, color="#F2F3F5", width=200),
+                            size=12, color=self.c("acc"))]),
+            ft.Row([ft.Text("CNN (картинки)", size=12, color=self.c("fg1"), width=200),
                     ft.Text(f"≈ {recs.max_cnn_params:,}".replace(",", " "),
-                            size=12, color="#00E5FF")]),
-            ft.Row([ft.Text("Mini-Transformer", size=12, color="#F2F3F5", width=200),
+                            size=12, color=self.c("acc"))]),
+            ft.Row([ft.Text("Mini-Transformer", size=12, color=self.c("fg1"), width=200),
                     ft.Text("✅ потянет" if recs.can_train_transformer else "⚠️ слабо",
-                            size=12, color="#3FBE6E" if recs.can_train_transformer else "#E5A23E")]),
+                            size=12, color=self.c("success") if recs.can_train_transformer else self.c("warning"))]),
         ]
         for note in recs.notes:
-            rec_rows.append(ft.Text(note, size=11, color="#8B8D93", italic=True))
+            rec_rows.append(ft.Text(note, size=11, color=self.c("fg3"), italic=True))
 
         rec_card = ft.Container(
             padding=16, border_radius=12,
-            border=ft.border.all(1, "#2B2D31"), bgcolor="#232428",
+            border=ft.border.all(1, self.c("line2")), bgcolor=self.c("bg2"),
             content=ft.Column([
                 ft.Text("🎯 Что твой комп потянет",
-                        size=14, weight=ft.FontWeight.W_600, color="#00E5FF"),
+                        size=14, weight=ft.FontWeight.W_600, color=self.c("acc")),
                 ft.Container(height=8),
                 *rec_rows,
             ], spacing=6),
         )
 
         self.content_panel.content = ft.Column([
-            ft.Text("Моя машина", size=24, weight=ft.FontWeight.W_500, color="#F2F3F5"),
+            ft.Text("Моя машина", size=24, weight=ft.FontWeight.W_500, color=self.c("fg1")),
             ft.Text("Что у тебя за железо и что оно сможет в Mi-AiLab.",
-                    size=13, color="#8B8D93"),
+                    size=13, color=self.c("fg3")),
             ft.Container(height=14),
             ft.Row([cpu_card, gpu_card], spacing=14),
             ft.Container(height=14),
             device_dropdown,
             ft.Container(height=14),
-            ft.Text("⚡ Бенчмарк", size=15, weight=ft.FontWeight.W_600, color="#F2F3F5"),
+            ft.Text("⚡ Бенчмарк", size=15, weight=ft.FontWeight.W_600, color=self.c("fg1")),
             ft.Text("Тренирует мини-MLP 100 итераций и меряет скорость. "
-                    "Сравни CPU vs GPU.", size=11, color="#8B8D93"),
+                    "Сравни CPU vs GPU.", size=11, color=self.c("fg3")),
             ft.Container(height=6),
             ft.Row([self.bench_button, self.bench_progress], spacing=14),
             ft.Container(height=8),
@@ -1108,41 +1248,41 @@ class App:
     def _render_bench_result(self, result: hw.BenchmarkResult | None) -> ft.Control:
         if result is None:
             return ft.Text("(нажми «Запустить бенчмарк»)",
-                           size=11, color="#5A5C63", italic=True)
+                           size=11, color=self.c("fg4"), italic=True)
         score_color = (
-            "#3FBE6E" if result.score >= 1000 else
-            "#00E5FF" if result.score >= 300 else
-            "#E5A23E" if result.score >= 100 else
-            "#E5484D"
+            self.c("success") if result.score >= 1000 else
+            self.c("acc") if result.score >= 300 else
+            self.c("warning") if result.score >= 100 else
+            self.c("danger")
         )
         return ft.Column([
             ft.Row([
-                ft.Text("Устройство:", size=12, color="#8B8D93", width=150),
-                ft.Text(result.device.upper(), size=14, color="#F2F3F5",
+                ft.Text("Устройство:", size=12, color=self.c("fg3"), width=150),
+                ft.Text(result.device.upper(), size=14, color=self.c("fg1"),
                         weight=ft.FontWeight.W_600),
             ]),
             ft.Row([
-                ft.Text("Время:", size=12, color="#8B8D93", width=150),
+                ft.Text("Время:", size=12, color=self.c("fg3"), width=150),
                 ft.Text(f"{result.elapsed_sec:.3f} сек на {result.iterations} итераций",
-                        size=12, color="#F2F3F5"),
+                        size=12, color=self.c("fg1")),
             ]),
             ft.Row([
-                ft.Text("Throughput:", size=12, color="#8B8D93", width=150),
+                ft.Text("Throughput:", size=12, color=self.c("fg3"), width=150),
                 ft.Text(f"{result.samples_per_sec:,.0f} samples/sec".replace(",", " "),
-                        size=12, color="#F2F3F5"),
+                        size=12, color=self.c("fg1")),
             ]),
             ft.Row([
-                ft.Text("Score:", size=12, color="#8B8D93", width=150),
+                ft.Text("Score:", size=12, color=self.c("fg3"), width=150),
                 ft.Text(f"{result.score}", size=18, color=score_color,
                         weight=ft.FontWeight.W_700),
-                ft.Text("(чем больше тем лучше)", size=11, color="#5A5C63"),
+                ft.Text("(чем больше тем лучше)", size=11, color=self.c("fg4")),
             ], spacing=8),
         ], spacing=4)
 
     def _on_benchmark_click(self, e):
         self.bench_button.disabled = True
         self.bench_progress.visible = True
-        self.bench_result_box.content = ft.Text("Тренирую...", size=12, color="#8B8D93")
+        self.bench_result_box.content = ft.Text("Тренирую...", size=12, color=self.c("fg3"))
         self.page.update()
 
         device = self.state.device
@@ -1154,7 +1294,7 @@ class App:
                 self.bench_result_box.content = self._render_bench_result(result)
             except Exception as ex:
                 self.bench_result_box.content = ft.Text(
-                    f"Ошибка бенчмарка: {ex}", size=12, color="#E5484D")
+                    f"Ошибка бенчмарка: {ex}", size=12, color=self.c("danger"))
             finally:
                 self.bench_button.disabled = False
                 self.bench_progress.visible = False
@@ -1176,23 +1316,23 @@ class App:
         if not items:
             items = [ft.Text(
                 "Нет файлов в data/texts/. Положи туда любой .txt — он появится тут.",
-                size=12, color="#8B8D93")]
+                size=12, color=self.c("fg3"))]
 
         self.content_panel.content = ft.Column([
             ft.Text("Выбери текстовый корпус", size=24, weight=ft.FontWeight.W_500,
-                    color="#F2F3F5"),
+                    color=self.c("fg1")),
             ft.Text("Char-LSTM будет учиться предсказывать следующий символ. "
                     "Чем больше и осмысленнее текст — тем лучше результат.",
-                    size=13, color="#8B8D93"),
+                    size=13, color=self.c("fg3")),
             ft.Container(height=8),
             ft.Container(
                 padding=12, border_radius=8,
-                border=ft.border.all(1, "#2B2D31"), bgcolor="#1A1B1E",
+                border=ft.border.all(1, self.c("line2")), bgcolor=self.c("bg1"),
                 content=ft.Text(
                     "💡 Где взять больший корпус: gutenberg.org → скачай любую книгу как "
                     "Plain Text UTF-8 → положи в data/texts/. Хорошие варианты для "
                     "начала: Alice in Wonderland (~150 KB), Sherlock Holmes (~600 KB).",
-                    size=11, color="#8B8D93"),
+                    size=11, color=self.c("fg3")),
             ),
             ft.Container(height=16),
             ft.Column(items, spacing=10),
@@ -1209,19 +1349,19 @@ class App:
         return ft.Container(
             padding=16,
             border_radius=12,
-            border=ft.border.all(1, "#00E5FF" if selected else "#2B2D31"),
-            bgcolor="#2B00E5FF" if selected else "#232428",
+            border=ft.border.all(1, self.c("acc") if selected else self.c("line2")),
+            bgcolor=self.c("acc_soft") if selected else self.c("bg2"),
             content=ft.Column([
                 ft.Row([
                     ft.Text(corpus.title, size=15, weight=ft.FontWeight.W_600,
-                            color="#F2F3F5"),
+                            color=self.c("fg1")),
                     ft.Container(
                         padding=ft.padding.symmetric(horizontal=8, vertical=2),
-                        border_radius=10, bgcolor="#2B2D31",
-                        content=ft.Text(corpus.description, size=10, color="#8B8D93"),
+                        border_radius=10, bgcolor=self.c("line2"),
+                        content=ft.Text(corpus.description, size=10, color=self.c("fg3")),
                     ),
                 ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
-                ft.Text(preview, size=11, color="#8B8D93", italic=True),
+                ft.Text(preview, size=11, color=self.c("fg3"), italic=True),
             ], spacing=8),
             on_click=lambda e, c=corpus: self._on_corpus_selected(c),
             ink=True,
@@ -1240,7 +1380,7 @@ class App:
 
     def _show_text_train_step(self):
         if self.state.text_corpus is None:
-            self.content_panel.content = ft.Text("Сначала выбери корпус", color="#8B8D93")
+            self.content_panel.content = ft.Text("Сначала выбери корпус", color=self.c("fg3"))
             return
 
         corpus = self.state.text_corpus
@@ -1249,31 +1389,31 @@ class App:
         # Параметры + контекст (живой счётчик)
         self.text_params_label = ft.Text(
             self._text_params_summary(vocab_size),
-            size=12, color="#00E5FF", weight=ft.FontWeight.W_500,
+            size=12, color=self.c("acc"), weight=ft.FontWeight.W_500,
         )
 
         # Гиперпараметры
         hidden_label = ft.Text(f"Hidden size (нейронов LSTM): {self.state.text_hidden_size}",
-                               size=12, color="#F2F3F5")
+                               size=12, color=self.c("fg1"))
         hidden_slider = ft.Slider(
             min=32, max=512, divisions=15, value=self.state.text_hidden_size,
-            active_color="#00E5FF", inactive_color="#2B2D31", width=400,
+            active_color=self.c("acc"), inactive_color=self.c("line2"), width=400,
             on_change=lambda e: self._on_text_hidden_changed(
                 int(e.control.value), hidden_label, vocab_size),
         )
         layers_label = ft.Text(f"LSTM-слоёв: {self.state.text_num_layers}",
-                               size=12, color="#F2F3F5")
+                               size=12, color=self.c("fg1"))
         layers_slider = ft.Slider(
             min=1, max=4, divisions=3, value=self.state.text_num_layers,
-            active_color="#00E5FF", inactive_color="#2B2D31", width=400,
+            active_color=self.c("acc"), inactive_color=self.c("line2"), width=400,
             on_change=lambda e: self._on_text_layers_changed(
                 int(e.control.value), layers_label, vocab_size),
         )
         epochs_label = ft.Text(f"Эпох: {self.state.text_epochs}",
-                               size=12, color="#F2F3F5")
+                               size=12, color=self.c("fg1"))
         epochs_slider = ft.Slider(
             min=1, max=100, divisions=99, value=self.state.text_epochs,
-            active_color="#00E5FF", inactive_color="#2B2D31", width=400,
+            active_color=self.c("acc"), inactive_color=self.c("line2"), width=400,
             on_change=lambda e: self._on_text_epochs_changed(int(e.control.value), epochs_label),
         )
         seq_dropdown = ft.Dropdown(
@@ -1291,23 +1431,23 @@ class App:
 
         # Live loss chart
         self.text_loss_chart = ft.LineChart(
-            data_series=[ft.LineChartData(data_points=[], color="#00E5FF",
+            data_series=[ft.LineChartData(data_points=[], color=self.c("acc"),
                                           stroke_width=2, curved=False)],
-            border=ft.border.all(1, "#2B2D31"),
-            horizontal_grid_lines=ft.ChartGridLines(interval=0.2, width=1, color="#2B2D31"),
-            vertical_grid_lines=ft.ChartGridLines(width=1, color="#2B2D31"),
+            border=ft.border.all(1, self.c("line2")),
+            horizontal_grid_lines=ft.ChartGridLines(interval=0.2, width=1, color=self.c("line2")),
+            vertical_grid_lines=ft.ChartGridLines(width=1, color=self.c("line2")),
             left_axis=ft.ChartAxis(
                 labels_size=60, labels_interval=0.2,
-                title=ft.Text("loss (норм.)", color="#8B8D93", size=10),
+                title=ft.Text("loss (норм.)", color=self.c("fg3"), size=10),
                 title_size=20,
             ),
             bottom_axis=ft.ChartAxis(
                 labels_size=20,
-                title=ft.Text("эпоха", color="#8B8D93", size=10), title_size=14,
+                title=ft.Text("эпоха", color=self.c("fg3"), size=10), title_size=14,
             ),
             min_x=0, max_x=self.state.text_epochs,
             min_y=0, max_y=1,
-            expand=True, height=220, tooltip_bgcolor="#0E0E11",
+            expand=True, height=220, tooltip_bgcolor=self.c("chart_bg"),
         )
 
         # Расширенные настройки для text mode
@@ -1322,7 +1462,7 @@ class App:
         train_button = ft.FilledButton(
             text="Старт обучения", icon=ft.icons.PLAY_ARROW,
             on_click=self._on_text_train_click,
-            style=ft.ButtonStyle(bgcolor="#00E5FF", color="#051518"),
+            style=ft.ButtonStyle(bgcolor=self.c("acc"), color=self.c("bg0")),
         )
         self.text_continue_button = ft.OutlinedButton(
             text=f"Дообучить ещё {self.state.text_epochs} эпох",
@@ -1330,27 +1470,27 @@ class App:
             on_click=self._on_text_continue_click,
             visible=self.state.text_model is not None,
         )
-        self.text_train_progress = ft.ProgressBar(visible=False, width=400, color="#00E5FF")
-        self.text_train_status = ft.Text("Готово к старту", size=12, color="#8B8D93")
+        self.text_train_progress = ft.ProgressBar(visible=False, width=400, color=self.c("acc"))
+        self.text_train_status = ft.Text("Готово к старту", size=12, color=self.c("fg3"))
         self.text_sample_box = ft.Container(
             padding=12, border_radius=8,
-            border=ft.border.all(1, "#2B2D31"), bgcolor="#1A1B1E",
+            border=ft.border.all(1, self.c("line2")), bgcolor=self.c("bg1"),
             content=ft.Text("(после первой эпохи здесь появится живой образец генерации)",
-                            size=11, color="#5A5C63", italic=True),
+                            size=11, color=self.c("fg4"), italic=True),
         )
 
         self.content_panel.content = ft.Column([
             ft.Text("Обучение char-LSTM", size=24, weight=ft.FontWeight.W_500,
-                    color="#F2F3F5"),
+                    color=self.c("fg1")),
             ft.Text(f"Корпус: {corpus.title} · {corpus.description}",
-                    size=12, color="#8B8D93"),
+                    size=12, color=self.c("fg3")),
             ft.Container(height=14),
-            ft.Text("Архитектура", size=13, weight=ft.FontWeight.W_500, color="#F2F3F5"),
+            ft.Text("Архитектура", size=13, weight=ft.FontWeight.W_500, color=self.c("fg1")),
             self.text_params_label,
             hidden_label, hidden_slider,
             layers_label, layers_slider,
             ft.Container(height=10),
-            ft.Text("Гиперпараметры", size=13, weight=ft.FontWeight.W_500, color="#F2F3F5"),
+            ft.Text("Гиперпараметры", size=13, weight=ft.FontWeight.W_500, color=self.c("fg1")),
             epochs_label, epochs_slider,
             ft.Row([seq_dropdown, lr_dropdown], spacing=12),
             ft.Container(height=10),
@@ -1360,11 +1500,11 @@ class App:
             self.text_train_progress,
             self.text_train_status,
             ft.Container(height=8),
-            ft.Text("Loss по эпохам", size=11, color="#8B8D93"),
+            ft.Text("Loss по эпохам", size=11, color=self.c("fg3")),
             self.text_loss_chart,
             ft.Container(height=10),
             ft.Text("Живой образец генерации (обновляется после каждой эпохи):",
-                    size=11, color="#8B8D93"),
+                    size=11, color=self.c("fg3")),
             self.text_sample_box,
         ], scroll=ft.ScrollMode.AUTO)
 
@@ -1396,7 +1536,7 @@ class App:
         # Последний образец генерации
         if final.sample:
             self.text_sample_box.content = ft.Text(
-                final.sample, size=12, color="#F2F3F5",
+                final.sample, size=12, color=self.c("fg1"),
                 font_family="Consolas, monospace",
                 selectable=True,
             )
@@ -1522,7 +1662,7 @@ class App:
                 f"{stats.elapsed_sec:.1f}с"
             )
             self.text_sample_box.content = ft.Text(
-                stats.sample, size=12, color="#F2F3F5",
+                stats.sample, size=12, color=self.c("fg1"),
                 font_family="Consolas, monospace",
                 selectable=True,
             )
@@ -1563,19 +1703,19 @@ class App:
     def _show_generate_step(self):
         if self.state.text_model is None:
             self.content_panel.content = ft.Text(
-                "Сначала обучи LSTM в шаге «Обучение»", color="#8B8D93")
+                "Сначала обучи LSTM в шаге «Обучение»", color=self.c("fg3"))
             return
 
         model = self.state.text_model
         prompt_field = ft.TextField(
             label="Префикс (с чего начать)", value="The ",
             multiline=True, min_lines=2, max_lines=4, width=600,
-            border_color="#2B2D31", focused_border_color="#00E5FF",
+            border_color=self.c("line2"), focused_border_color=self.c("acc"),
         )
-        temperature_label = ft.Text("Temperature: 0.8", size=12, color="#F2F3F5")
+        temperature_label = ft.Text("Temperature: 0.8", size=12, color=self.c("fg1"))
         temperature_slider = ft.Slider(
             min=0.3, max=2.0, divisions=17, value=0.8,
-            active_color="#00E5FF", inactive_color="#2B2D31", width=400,
+            active_color=self.c("acc"), inactive_color=self.c("line2"), width=400,
         )
 
         def on_temp_change(e):
@@ -1583,10 +1723,10 @@ class App:
             self.page.update()
         temperature_slider.on_change = on_temp_change
 
-        max_chars_label = ft.Text("Длина генерации: 300 символов", size=12, color="#F2F3F5")
+        max_chars_label = ft.Text("Длина генерации: 300 символов", size=12, color=self.c("fg1"))
         max_chars_slider = ft.Slider(
             min=50, max=2000, divisions=39, value=300,
-            active_color="#00E5FF", inactive_color="#2B2D31", width=400,
+            active_color=self.c("acc"), inactive_color=self.c("line2"), width=400,
         )
 
         def on_len_change(e):
@@ -1596,17 +1736,17 @@ class App:
 
         output_text = ft.Text(
             "(нажми «Сгенерировать»)",
-            size=13, color="#F2F3F5",
+            size=13, color=self.c("fg1"),
             font_family="Consolas, monospace",
             selectable=True,
         )
         output_box = ft.Container(
             padding=14, border_radius=10,
-            border=ft.border.all(1, "#2B2D31"), bgcolor="#1A1B1E",
+            border=ft.border.all(1, self.c("line2")), bgcolor=self.c("bg1"),
             content=output_text,
         )
 
-        gen_status = ft.Text("", size=11, color="#8B8D93")
+        gen_status = ft.Text("", size=11, color=self.c("fg3"))
 
         def on_generate(e):
             gen_status.value = "Генерация..."
@@ -1636,22 +1776,22 @@ class App:
         generate_button = ft.FilledButton(
             text="Сгенерировать", icon=ft.icons.AUTO_AWESOME,
             on_click=on_generate,
-            style=ft.ButtonStyle(bgcolor="#00E5FF", color="#051518"),
+            style=ft.ButtonStyle(bgcolor=self.c("acc"), color=self.c("bg0")),
         )
 
         self.content_panel.content = ft.Column([
             ft.Text("Генерация текста", size=24, weight=ft.FontWeight.W_500,
-                    color="#F2F3F5"),
+                    color=self.c("fg1")),
             ft.Text(
                 f"Модель: {model.count_params():,} параметров · "
                 f"вокабуляр: {model.tokenizer.vocab_size} символов".replace(",", " "),
-                size=12, color="#8B8D93"),
+                size=12, color=self.c("fg3")),
             ft.Container(height=14),
             prompt_field,
             ft.Container(height=10),
             temperature_label, temperature_slider,
             ft.Text("0.3 = осторожно, повторно · 0.8 = норма · 2.0 = хаос",
-                    size=10, color="#5A5C63"),
+                    size=10, color=self.c("fg4")),
             ft.Container(height=8),
             max_chars_label, max_chars_slider,
             ft.Container(height=14),
