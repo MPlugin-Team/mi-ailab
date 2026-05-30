@@ -31,6 +31,7 @@ from src import cnn_model as cm
 from src import image_datasets as imds
 from src import tooltips as tips
 from src import transformer_model as tform
+from src import instruction_datasets as ids
 
 
 # === Общее состояние приложения ===
@@ -1944,33 +1945,88 @@ class App:
     # === Шаг 1: Выбор корпуса ===
 
     def _show_corpus_step(self):
+        t = self.t
         corpora = tds.list_corpora()
         items = [self._corpus_card(c) for c in corpora]
 
         if not items:
             items = [ft.Text(
                 "Нет файлов в data/texts/. Положи туда любой .txt — он появится тут.",
-                size=12, color=self.c("fg3"))]
+                size=12, color=t.fg3)]
+
+        # === Скачивание Q&A инструкционных датасетов ===
+        instruction_buttons = []
+        for info in ids.list_catalog():
+            if info.url is None:
+                continue
+            instruction_buttons.append(ft.Container(
+                padding=10, border_radius=6,
+                border=ft.border.all(1, t.line2), bgcolor=t.bg2,
+                content=ft.Row([
+                    ft.Icon(ft.icons.DOWNLOAD, size=16, color=t.acc),
+                    ft.Column([
+                        ft.Text(info.title, size=12,
+                                weight=ft.FontWeight.W_600, color=t.fg1),
+                        ft.Text(f"{info.size_approx} · {info.language.upper()}",
+                                size=10, color=t.fg3,
+                                font_family="Consolas, monospace"),
+                    ], spacing=2, expand=True),
+                ], spacing=10),
+                on_click=lambda e, i=info: self._on_instruction_download(i),
+                ink=True,
+                tooltip=info.description,
+            ))
 
         self.content_panel.content = ft.Column([
             ft.Text("Выбери текстовый корпус", size=24, weight=ft.FontWeight.W_500,
-                    color=self.c("fg1")),
-            ft.Text("Char-LSTM будет учиться предсказывать следующий символ. "
-                    "Чем больше и осмысленнее текст — тем лучше результат.",
-                    size=13, color=self.c("fg3")),
-            ft.Container(height=8),
+                    color=t.fg1),
+            ft.Text("Для обычной тренировки выбери книгу. "
+                    "Для chat-ассистента — скачай Q&A датасет (раздел ниже).",
+                    size=13, color=t.fg3),
+            ft.Container(height=14),
+
+            ft.Container(
+                padding=14, border_radius=8,
+                border=ft.border.all(1, t.acc), bgcolor=t.acc_soft,
+                content=ft.Column([
+                    ft.Row([
+                        ft.Icon(ft.icons.CHAT_BUBBLE_OUTLINE, size=16, color=t.acc),
+                        ft.Text("📥 Скачать Q&A датасет для chat-ассистента",
+                                size=13, weight=ft.FontWeight.W_600, color=t.acc),
+                    ], spacing=8),
+                    ft.Text("После скачивания → выбери .txt в списке ниже → "
+                            "обучи модель → в Генерации появится chat-режим.",
+                            size=11, color=t.fg2),
+                    ft.Container(height=4),
+                    ft.Column(instruction_buttons, spacing=6),
+                ], spacing=6),
+            ),
+            ft.Container(height=14),
+
             ft.Container(
                 padding=12, border_radius=8,
-                border=ft.border.all(1, self.c("line2")), bgcolor=self.c("bg1"),
+                border=ft.border.all(1, t.line2), bgcolor=t.bg1,
                 content=ft.Text(
                     "💡 Где взять больший корпус: gutenberg.org → скачай любую книгу как "
                     "Plain Text UTF-8 → положи в data/texts/. Хорошие варианты для "
                     "начала: Alice in Wonderland (~150 KB), Sherlock Holmes (~600 KB).",
-                    size=11, color=self.c("fg3")),
+                    size=11, color=t.fg3),
             ),
-            ft.Container(height=16),
+            ft.Container(height=14),
             ft.Column(items, spacing=10),
         ], scroll=ft.ScrollMode.AUTO)
+
+    def _on_instruction_download(self, info: ids.InstructionDatasetInfo):
+        def worker():
+            try:
+                self._snackbar(f"Скачиваю {info.title}... (~30 сек)")
+                path = ids.download_instruction_dataset(info)
+                self._snackbar(f"✅ Готово: {path.name} — выбери его в списке ниже")
+                self._show_corpus_step()
+                self.page.update()
+            except Exception as ex:
+                self._snackbar(f"Ошибка скачивания: {ex}")
+        threading.Thread(target=worker, daemon=True).start()
 
     def _corpus_card(self, corpus: tds.TextCorpus) -> ft.Container:
         selected = (self.state.text_corpus is not None
@@ -2275,6 +2331,11 @@ class App:
             return
         self._run_text_training(existing_model=self.state.text_model)
 
+    def _on_gen_mode_change(self):
+        """Перерисовываем экран генерации чтобы поменялись labels (Префикс ↔ Вопрос)."""
+        self._show_generate_step()
+        self.page.update()
+
     def _on_text_arch_changed(self, arch: str):
         if arch == self.state.text_arch:
             return
@@ -2425,8 +2486,35 @@ class App:
             return
 
         model = self.state.text_model
+        t = self.t
+
+        # Авто-детект chat-режима: если корпус — это Q&A датасет
+        is_chat_corpus = False
+        if self.state.text_corpus is not None:
+            key = self.state.text_corpus.key.lower()
+            is_chat_corpus = any(k in key for k in
+                                  ["alpaca", "dolly", "saiga", "instruct"])
+
+        # Tab Toggle: режим free-form vs chat
+        mode_segment = ft.SegmentedButton(
+            selected={"chat"} if is_chat_corpus else {"free"},
+            allow_multiple_selection=False,
+            segments=[
+                ft.Segment(value="free", label=ft.Text("📝 Free-form"),
+                           icon=ft.Icon(ft.icons.EDIT_NOTE)),
+                ft.Segment(value="chat", label=ft.Text("💬 Chat"),
+                           icon=ft.Icon(ft.icons.CHAT)),
+            ],
+            on_change=lambda e: self._on_gen_mode_change(),
+        )
+        # Запоминаем выбранный режим в state (не AppState — локально через атрибут виджета)
+        self._gen_mode_ref = mode_segment
+
+        default_prompt = ("Как варить пельмени?" if is_chat_corpus
+                          else "The ")
+        label = "Вопрос для модели" if is_chat_corpus else "Префикс (с чего начать)"
         prompt_field = ft.TextField(
-            label="Префикс (с чего начать)", value="The ",
+            label=label, value=default_prompt,
             multiline=True, min_lines=2, max_lines=4, width=600,
             border_color=self.c("line2"), focused_border_color=self.c("acc"),
         )
@@ -2473,23 +2561,35 @@ class App:
 
             def worker():
                 try:
+                    # Определяем режим: free / chat
+                    selected = self._gen_mode_ref.selected
+                    is_chat = "chat" in selected if selected else False
+                    user_input = prompt_field.value or " "
+                    prompt = (ids.make_chat_prompt(user_input) if is_chat
+                              else user_input)
+
                     # Dispatch на нужный generator в зависимости от типа модели
                     if isinstance(model, tform.MiniGPT):
-                        result = tform.generate_transformer(
-                            model,
-                            prompt=prompt_field.value or " ",
+                        raw = tform.generate_transformer(
+                            model, prompt=prompt,
                             max_chars=int(max_chars_slider.value),
                             temperature=float(temperature_slider.value),
                         )
                     else:
-                        result = tm.generate_text(
-                            model,
-                            prompt=prompt_field.value or " ",
+                        raw = tm.generate_text(
+                            model, prompt=prompt,
                             max_chars=int(max_chars_slider.value),
                             temperature=float(temperature_slider.value),
                         )
+
+                    if is_chat:
+                        # Извлекаем чистый ответ
+                        result = ids.extract_answer(raw, prompt)
+                        gen_status.value = f"💬 Ответ · {len(result)} символов"
+                    else:
+                        result = raw
+                        gen_status.value = f"Готово · {len(result)} символов"
                     output_text.value = result
-                    gen_status.value = f"Готово · {len(result)} символов"
                 except Exception as ex:
                     output_text.value = f"Ошибка: {ex}"
                     gen_status.value = ""
@@ -2513,7 +2613,9 @@ class App:
                 f"Модель: {model.count_params():,} параметров · "
                 f"вокабуляр: {model.tokenizer.vocab_size} символов".replace(",", " "),
                 size=12, color=self.c("fg3")),
-            ft.Container(height=14),
+            ft.Container(height=10),
+            mode_segment,
+            ft.Container(height=12),
             prompt_field,
             ft.Container(height=10),
             temperature_label, temperature_slider,
