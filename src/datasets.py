@@ -97,6 +97,35 @@ BUILTIN: list[DatasetInfo] = [
             "operation": {0: "+ (сложение)", 1: "− (вычитание)", 2: "× (умножение)"},
         },
     ),
+    # === Real-world датасеты с интернета ===
+    DatasetInfo(
+        key="wine_quality_red",
+        title="Wine Quality — красное вино",
+        description="1599 образцов красного вина. Признаки: химия (алкоголь, кислотность, сахар). Цель: оценка качества 0-10 от дегустаторов. UCI ML Repository.",
+        task_type="regression",
+        target_column="quality",
+    ),
+    DatasetInfo(
+        key="wine_quality_white",
+        title="Wine Quality — белое вино",
+        description="4898 образцов белого вина с теми же химическими признаками. Качество предсказывать сложнее чем у красного. UCI ML Repository.",
+        task_type="regression",
+        target_column="quality",
+    ),
+    DatasetInfo(
+        key="california_housing",
+        title="California Housing — цены домов в Калифорнии",
+        description="20640 районов Калифорнии. Признаки: доход, возраст домов, число комнат, население, координаты. Цель: медианная цена дома. Sklearn.",
+        task_type="regression",
+        target_column="MedHouseVal",
+    ),
+    DatasetInfo(
+        key="diabetes",
+        title="Diabetes — прогрессия диабета",
+        description="442 пациента. Признаки: возраст, пол, BMI, давление, 6 показателей крови. Цель: прогрессия заболевания через год. Sklearn.",
+        task_type="regression",
+        target_column="target",
+    ),
 ]
 
 
