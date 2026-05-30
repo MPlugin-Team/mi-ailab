@@ -69,6 +69,8 @@ class AppState:
     # === Text generation (char-LSTM или Mini-Transformer) ===
     text_corpus: tds.TextCorpus | None = None
     text_arch: str = "lstm"        # "lstm" | "transformer"
+    text_tokenizer_kind: str = "char"  # "char" | "bpe"
+    text_bpe_vocab: int = 2000
     text_hidden_size: int = 256    # для LSTM: hidden; для transformer: n_embd
     text_num_layers: int = 2       # для LSTM: layers; для transformer: n_layer
     text_n_head: int = 4           # только для transformer
@@ -2093,6 +2095,16 @@ class App:
             on_change=lambda e: self._on_text_arch_changed(e.control.value),
             width=380,
         )
+        tokenizer_dropdown = ft.Dropdown(
+            label="Токенайзер",
+            value=self.state.text_tokenizer_kind,
+            options=[
+                ft.dropdown.Option("char", "char-level (буквы, простой)"),
+                ft.dropdown.Option("bpe", "BPE (субслова, как у GPT — качественнее)"),
+            ],
+            on_change=lambda e: self._on_text_tokenizer_changed(e.control.value),
+            width=380,
+        )
 
         # Гиперпараметры
         hidden_label = ft.Text(f"Hidden size (нейронов LSTM): {self.state.text_hidden_size}",
@@ -2195,7 +2207,7 @@ class App:
             ft.Container(height=14),
             self._preset_row(tips.TEXT_PRESETS, self._apply_text_preset),
             ft.Container(height=14),
-            arch_dropdown,
+            ft.Row([arch_dropdown, tokenizer_dropdown], spacing=12, wrap=True),
             ft.Container(height=10),
             ft.Row([
                 ft.Text("Архитектура", size=13, weight=ft.FontWeight.W_500, color=self.c("fg1")),
@@ -2336,6 +2348,16 @@ class App:
         self._show_generate_step()
         self.page.update()
 
+    def _on_text_tokenizer_changed(self, kind: str):
+        if kind == self.state.text_tokenizer_kind:
+            return
+        self.state.text_tokenizer_kind = kind
+        self.state.text_model = None   # вокабуляр меняется → сброс
+        self.state.text_history = []
+        self._snackbar(f"Токенайзер: {kind.upper()} — модель сброшена")
+        self._show_text_train_step()
+        self.page.update()
+
     def _on_text_arch_changed(self, arch: str):
         if arch == self.state.text_arch:
             return
@@ -2395,6 +2417,8 @@ class App:
                 learning_rate=self.state.text_lr,
                 dropout=self.state.text_dropout,
                 device=self.state.device,
+                tokenizer_kind=self.state.text_tokenizer_kind,
+                bpe_vocab_size=self.state.text_bpe_vocab,
             )
         else:
             cfg = tm.TextTrainConfig(
@@ -2408,8 +2432,10 @@ class App:
                 dropout=self.state.text_dropout,
                 optimizer=self.state.text_optimizer,
                 device=self.state.device,
-                mixed_precision=True,         # FP16 — бесплатное 2x ускорение на GPU
-                checkpoint_every=10,          # автосейв каждые 10 эпох
+                mixed_precision=True,
+                checkpoint_every=10,
+                tokenizer_kind=self.state.text_tokenizer_kind,
+                bpe_vocab_size=self.state.text_bpe_vocab,
             )
         text = self.state.text_corpus.text
         epoch_offset = self.state.text_history[-1].epoch if (is_continue and self.state.text_history) else 0

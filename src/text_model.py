@@ -65,6 +65,8 @@ class TextTrainConfig:
     mixed_precision: bool = False  # FP16 — 2x ускорение на GPU
     checkpoint_every: int = 0    # 0 = выкл, иначе сохранять каждые N эпох
     checkpoint_dir: str = "models/_checkpoints"
+    tokenizer_kind: str = "char"   # "char" | "bpe"
+    bpe_vocab_size: int = 2000    # размер BPE вокабуляра (только для bpe)
 
 
 @dataclass
@@ -156,7 +158,11 @@ def train_text(
     device = get_device(cfg.device)
 
     if existing_model is None:
-        tokenizer = CharTokenizer(text)
+        if cfg.tokenizer_kind == "bpe":
+            from src.bpe_tokenizer import BPETokenizer
+            tokenizer = BPETokenizer.train_from_text(text, vocab_size=cfg.bpe_vocab_size)
+        else:
+            tokenizer = CharTokenizer(text)
         model = CharLSTM(
             vocab_size=tokenizer.vocab_size,
             embed_size=cfg.embed_size,

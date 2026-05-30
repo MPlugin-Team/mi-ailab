@@ -48,6 +48,8 @@ class TransformerTrainConfig:
     dropout: float = 0.1
     device: str = "auto"
     grad_clip: float = 1.0
+    tokenizer_kind: str = "char"   # "char" | "bpe"
+    bpe_vocab_size: int = 2000
 
 
 @dataclass
@@ -175,7 +177,11 @@ def train_transformer(
     device = get_device(cfg.device)
 
     if existing_model is None:
-        tokenizer = CharTokenizer(text)
+        if cfg.tokenizer_kind == "bpe":
+            from src.bpe_tokenizer import BPETokenizer
+            tokenizer = BPETokenizer.train_from_text(text, vocab_size=cfg.bpe_vocab_size)
+        else:
+            tokenizer = CharTokenizer(text)
         model = MiniGPT(
             vocab_size=tokenizer.vocab_size,
             seq_len=cfg.seq_len,
