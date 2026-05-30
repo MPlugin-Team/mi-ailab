@@ -1,0 +1,21 @@
+# CNN на MNIST — классификация рукописных цифр
+# Тренируется быстро, достигает 98%+ точности.
+# Через GUI: 🖼️ Картинки → MNIST → пресет «🎯 Точно»
+
+dataset: mnist                  # mnist | fashion_mnist
+max_samples: 60000              # вся обучающая выборка (60K)
+
+# Архитектура SimpleCNN
+hidden_size: 128                # размер FC-слоя после свёрток
+
+# Гиперпараметры
+epochs: 10
+batch_size: 64
+learning_rate: 0.001
+optimizer: adam
+
+# Прочее
+device: auto                    # auto | cpu | cuda
+
+# Ожидание: ~30 сек/эпоху на GPU, ~5 мин на CPU
+# Результат: 98-99% accuracy на тестовом сете

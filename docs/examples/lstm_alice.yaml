@@ -1,0 +1,25 @@
+# Char-LSTM на «Alice in Wonderland»
+# Базовый старт — быстро тренируется, годится для теста pipeline.
+# Запуск: py -3.11 cli.py train --config docs/examples/lstm_alice.yaml
+
+corpus: alice                   # data/texts/alice.txt
+arch: lstm                      # классика 2015 от Karpathy
+
+# Архитектура
+hidden: 256                     # нейронов в LSTM
+num_layers: 2
+
+# Гиперпараметры
+seq_len: 100                    # контекст в символах
+batch_size: 64
+epochs: 50
+learning_rate: 0.003
+dropout: 0.2
+
+# Прочее
+tokenizer: char                 # char | bpe (для русского лучше bpe)
+device: auto                    # auto | cpu | cuda
+checkpoint_every: 10            # автосейв каждые 10 эпох
+
+# Ожидание: ~5 мин на GPU, ~30 мин на CPU
+# Результат: модель генерирует англоязычный текст в стиле Алисы

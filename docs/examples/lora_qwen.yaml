@@ -1,0 +1,29 @@
+# LoRA fine-tuning Qwen 1.5B на Mi-AI личности
+# Превращает Qwen в Mi-AI ассистента за 30-60 минут на RTX 4050.
+# Запуск:
+#   py -3.11 cli.py lora-finetune \
+#     --model qwen2_1.5b \
+#     --data data/texts/mi_ai_training_5000.txt \
+#     --epochs 3 \
+#     --batch 4 \
+#     --lr 1e-4 \
+#     --lora-r 16 \
+#     --output models/mi_ai_adapter
+
+# Базовая модель (см. py cli.py lora-finetune --list)
+model: qwen2_1.5b               # 1.5B параметров, влезает в 5 GB VRAM с 4-bit
+data: data/texts/mi_ai_training_5000.txt
+
+# LoRA-параметры
+lora_r: 16                      # 8 = быстро, 16 = средне, 32+ = больше адаптер
+epochs: 3                       # для 5000 пар хватит 3-5 эпох
+batch_size: 4                   # 1-2 если OOM
+learning_rate: 1e-4
+
+# Квантизация
+use_4bit: true                  # экономит VRAM (нужен bitsandbytes)
+max_seq_len: 512                # длина обучающего окна
+
+# Дополнительно
+max_samples: 0                  # 0 = все пары из datasets
+output: models/mi_ai_adapter

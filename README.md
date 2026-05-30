@@ -144,8 +144,13 @@ mi-ailab/
 │   ├── cnn_model.py                ← SimpleCNN для картинок
 │   ├── instruction_datasets.py     ← Alpaca/Dolly downloader
 │   └── lora_finetune.py            ← LoRA на готовых LLM (Qwen/Phi/Llama)
-├── experiments/
-│   └── sherlock_transformer.yaml   ← пример конфига для CLI
+├── docs/                           ← документация
+│   ├── QUICKSTART.md, INSTALL.md, ARCHITECTURES.md, CLI.md, DEPLOY.md
+│   └── examples/                   ← готовые YAML-конфиги для CLI
+│       ├── lstm_alice.yaml
+│       ├── transformer_sherlock.yaml
+│       ├── cnn_mnist.yaml
+│       └── lora_qwen.yaml
 ├── data/
 │   ├── *.csv                       ← табличные датасеты
 │   └── texts/*.txt                 ← корпуса литературы
@@ -221,6 +226,16 @@ open-source ML (PyTorch / HuggingFace / llama.cpp).
 Apache 2.0 даёт код «как есть», без гарантий. Ты отвечаешь за то что делаешь.
 
 ---
+
+## 📚 Документация
+
+Полная документация в [docs/](docs/):
+- [QUICKSTART.md](docs/QUICKSTART.md) — первые 5 минут
+- [INSTALL.md](docs/INSTALL.md) — установка + GPU
+- [ARCHITECTURES.md](docs/ARCHITECTURES.md) — MLP / CNN / LSTM / Transformer / LoRA
+- [CLI.md](docs/CLI.md) — справка по cli.py
+- [DEPLOY.md](docs/DEPLOY.md) — деплой через Mi-AiPro
+- [examples/](docs/examples/) — готовые YAML-конфиги для тренировок
 
 ## 🤝 Стек
 
