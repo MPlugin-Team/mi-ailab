@@ -1398,6 +1398,7 @@ class App:
             self.text_sample_box.content = ft.Text(
                 final.sample, size=12, color="#F2F3F5",
                 font_family="Consolas, monospace",
+                selectable=True,
             )
 
     @staticmethod
@@ -1523,6 +1524,7 @@ class App:
             self.text_sample_box.content = ft.Text(
                 stats.sample, size=12, color="#F2F3F5",
                 font_family="Consolas, monospace",
+                selectable=True,
             )
             try:
                 self.page.update()

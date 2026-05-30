@@ -211,7 +211,8 @@ def train_text(
             n_batches += 1
 
         train_loss = running / max(n_batches, 1)
-        sample = generate_text(model, prompt="The ", max_chars=80, temperature=0.8)
+        # 250 символов — достаточно чтобы увидеть структуру (1-3 предложения)
+        sample = generate_text(model, prompt="The ", max_chars=250, temperature=0.8)
 
         stats = TextEpochStats(
             epoch=epoch + epoch_offset,
