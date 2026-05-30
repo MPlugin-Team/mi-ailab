@@ -41,10 +41,64 @@ class HardwareInfo:
         return self.cuda_available and self.gpu_name is not None
 
 
+def _real_cpu_name() -> str:
+    """
+    Нормальное название CPU. platform.processor() на Windows возвращает
+    бесполезное 'Intel64 Family 6 Model 186 Stepping 2'. Достаём из реестра
+    'Intel(R) Core(TM) i7-...' напрямую.
+    """
+    if platform.system() == "Windows":
+        try:
+            import winreg
+            key = winreg.OpenKey(
+                winreg.HKEY_LOCAL_MACHINE,
+                r"HARDWARE\DESCRIPTION\System\CentralProcessor\0",
+            )
+            name = winreg.QueryValueEx(key, "ProcessorNameString")[0]
+            winreg.CloseKey(key)
+            return name.strip()
+        except Exception:
+            pass
+    if platform.system() == "Linux":
+        try:
+            with open("/proc/cpuinfo") as f:
+                for line in f:
+                    if "model name" in line:
+                        return line.split(":", 1)[1].strip()
+        except Exception:
+            pass
+    if platform.system() == "Darwin":
+        try:
+            import subprocess
+            return subprocess.check_output(
+                ["sysctl", "-n", "machdep.cpu.brand_string"]
+            ).decode().strip()
+        except Exception:
+            pass
+    return platform.processor() or "Unknown CPU"
+
+
+def _real_os_name() -> str:
+    """
+    Различает Win10/Win11 по build-номеру (Microsoft оставила major=10
+    для обеих, поэтому platform.release() врёт).
+    """
+    system = platform.system()
+    if system == "Windows":
+        try:
+            import sys
+            build = sys.getwindowsversion().build
+            # Windows 11 начинается с build 22000
+            major = "11" if build >= 22000 else "10"
+            return f"Windows {major} (build {build})"
+        except Exception:
+            return f"Windows {platform.release()}"
+    return f"{system} {platform.release()}"
+
+
 def detect_hardware() -> HardwareInfo:
     """Собирает информацию о CPU/GPU/RAM/Python через psutil/torch."""
-    # CPU
-    cpu_name = platform.processor() or "Unknown CPU"
+    cpu_name = _real_cpu_name()
     cpu_cores = os.cpu_count() or 1
 
     try:
@@ -73,7 +127,7 @@ def detect_hardware() -> HardwareInfo:
             gpu_vram_gb = None
 
     return HardwareInfo(
-        os_name=f"{platform.system()} {platform.release()}",
+        os_name=_real_os_name(),
         cpu_name=cpu_name,
         cpu_cores=cpu_cores_physical,
         cpu_threads=cpu_threads,

@@ -840,10 +840,11 @@ class App:
             rows = []
             for label, value in lines:
                 rows.append(ft.Row([
-                    ft.Text(label, size=12, color="#8B8D93", width=140),
+                    ft.Text(label, size=12, color="#8B8D93", width=130, no_wrap=True),
                     ft.Text(value, size=13, color="#F2F3F5",
-                            weight=ft.FontWeight.W_500, selectable=True),
-                ], spacing=8))
+                            weight=ft.FontWeight.W_500, selectable=True,
+                            expand=True),     # значение занимает остаток и переносится
+                ], spacing=8, vertical_alignment=ft.CrossAxisAlignment.START))
             return ft.Container(
                 padding=16, border_radius=12,
                 border=ft.border.all(1, "#2B2D31"), bgcolor="#232428",
