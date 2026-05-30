@@ -88,6 +88,29 @@ CATALOG: list[PretrainedModelInfo] = [
         min_vram_lora_gb=4.5,
         language="en",
     ),
+    PretrainedModelInfo(
+        key="saiga_8b",
+        title="Saiga YandexGPT 8B (русский)",
+        description="Базовая модель Mi-AiPro. Llama-3-8B дообученная на русских "
+                    "инструкциях IlyaGusev. С LoRA → 'Mi-AI' персонаж/стиль. "
+                    "Нужно 4-bit квантизация (~7 GB VRAM) или 16+ GB полная.",
+        hf_id="IlyaGusev/saiga_yandexgpt_8b",
+        params_b=8.0,
+        min_vram_gb=18.0,
+        min_vram_lora_gb=8.0,
+        language="ru",
+    ),
+    PretrainedModelInfo(
+        key="qwen2_3b",
+        title="Qwen 2.5 3B (русский+английский)",
+        description="Альтернатива Saiga если её VRAM не хватает. Меньше, "
+                    "но Qwen хорошо знает русский. Apache 2.0.",
+        hf_id="Qwen/Qwen2.5-3B",
+        params_b=3.0,
+        min_vram_gb=7.0,
+        min_vram_lora_gb=5.0,
+        language="multi",
+    ),
 ]
 
 
