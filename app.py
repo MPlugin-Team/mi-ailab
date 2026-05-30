@@ -2904,6 +2904,16 @@ class App:
         self.text_stop_button.visible = True
         is_continue = existing_model is not None
         if not is_continue:
+            # ВАЖНО: освобождаем старую модель чтобы её VRAM ушла в garbage collection
+            self.state.text_model = None
+            import gc as _gc
+            _gc.collect()
+            try:
+                import torch as _t
+                if _t.cuda.is_available():
+                    _t.cuda.empty_cache()
+            except Exception:
+                pass
             self.text_loss_chart.data_series[0].data_points = []
             self.state.text_history = []
             self.text_loss_chart.max_x = self.state.text_epochs

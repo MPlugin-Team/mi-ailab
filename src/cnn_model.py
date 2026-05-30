@@ -117,6 +117,11 @@ def train_cnn(
 ) -> tuple[SimpleCNN, list[CNNEpochStats]]:
     """Тренирует CNN на картинках. Возвращает (модель, история)."""
     device = get_device(cfg.device)
+    # Чистим VRAM от прошлых тренировок
+    import gc
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
     in_channels = X_train.shape[1]
     image_size = X_train.shape[2]

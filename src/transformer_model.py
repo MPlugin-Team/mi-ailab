@@ -177,6 +177,12 @@ def train_transformer(
     """Тренирует MiniGPT на тексте."""
     device = get_device(cfg.device)
 
+    # Чистим VRAM перед тренировкой — снимает утечки от прошлых сессий
+    import gc
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
     if existing_model is None:
         if cfg.tokenizer_kind == "bpe":
             from src.bpe_tokenizer import BPETokenizer

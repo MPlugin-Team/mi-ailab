@@ -136,6 +136,11 @@ def train(
 
     # 2) train/val split
     device = get_device(cfg.device)
+    # Чистим VRAM от прошлых тренировок
+    import gc
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
     n = len(X)
     n_val = int(n * val_split)
     idx = np.random.permutation(n)

@@ -158,6 +158,12 @@ def train_text(
     """
     device = get_device(cfg.device)
 
+    # Чистим VRAM от прошлых тренировок (утечки между сессиями в одном процессе)
+    import gc
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
     if existing_model is None:
         if cfg.tokenizer_kind == "bpe":
             from src.bpe_tokenizer import BPETokenizer
