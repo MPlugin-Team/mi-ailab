@@ -32,6 +32,7 @@ from src import image_datasets as imds
 from src import tooltips as tips
 from src import transformer_model as tform
 from src import instruction_datasets as ids
+from src import lora_finetune as lora_mod
 
 
 # === Общее состояние приложения ===
@@ -87,6 +88,20 @@ class AppState:
     # === Hardware (мой комп) ===
     hardware_info: hw.HardwareInfo | None = None
     last_benchmark: hw.BenchmarkResult | None = None
+
+    # === LoRA fine-tuning готовых LLM ===
+    lora_base_key: str | None = None         # ключ из lora_finetune.CATALOG
+    lora_dataset_path: str | None = None      # путь к .txt с ### Question/### Answer
+    lora_epochs: int = 3
+    lora_r: int = 8
+    lora_lr: float = 1e-4
+    lora_max_samples: int = 500
+    lora_batch_size: int = 4
+    lora_use_4bit: bool = True
+    lora_model: object = None                 # peft-wrapped model after training
+    lora_tokenizer: object = None
+    lora_adapter_path: str | None = None      # куда сохранён адаптер
+    lora_history: list = field(default_factory=list)
 
     # === CNN (картинки) ===
     cnn_dataset: imds.LoadedImageDataset | None = None
@@ -242,6 +257,12 @@ class App:
                 ("Обучение", "_show_cnn_train_step"),
                 ("Тест", "_show_cnn_test_step"),
             ]
+        if self.state.mode == "lora":
+            return [
+                ("Базовая модель", "_show_lora_model_step"),
+                ("Q&A датасет", "_show_lora_data_step"),
+                ("Тренировка + чат", "_show_lora_train_step"),
+            ]
         return [
             ("Датасет", "_show_dataset_step"),
             ("Обучение", "_show_train_step"),
@@ -256,6 +277,7 @@ class App:
             self._mode_tab("regression", "Регрессия",  "MLP",   ft.icons.SHOW_CHART),
             self._mode_tab("text",       "Текст",      "LSTM",  ft.icons.TEXT_FIELDS),
             self._mode_tab("cnn",        "Картинки",   "CNN",   ft.icons.IMAGE),
+            self._mode_tab("lora",       "Дообучение", "LoRA",  ft.icons.AUTO_FIX_HIGH),
             self._mode_tab("models",     "Мои модели", "saved", ft.icons.SAVE),
         ]
         # Step buttons
@@ -427,6 +449,13 @@ class App:
                 return
             if idx == 2 and self.state.cnn_model is None:
                 self._snackbar("Сначала обучи CNN в шаге 'Обучение'")
+                return
+        elif self.state.mode == "lora":
+            if idx >= 1 and self.state.lora_base_key is None:
+                self._snackbar("Сначала выбери базовую модель")
+                return
+            if idx >= 2 and self.state.lora_dataset_path is None:
+                self._snackbar("Сначала выбери Q&A датасет")
                 return
         # hardware/models — нет гардов
 
@@ -1944,6 +1973,424 @@ class App:
             ft.Container(height=8),
             ft.Row(cards, spacing=10, wrap=True),
         ], scroll=ft.ScrollMode.AUTO)
+
+    # ================== LoRA FINE-TUNING ==================
+
+    def _show_lora_model_step(self):
+        """Шаг 1: выбор базовой LLM из каталога."""
+        t = self.t
+        info = self.state.hardware_info or hw.detect_hardware()
+        self.state.hardware_info = info
+        user_vram = info.gpu_vram_gb if info.has_gpu else 0
+
+        cards = []
+        for m in lora_mod.list_pretrained():
+            selected = self.state.lora_base_key == m.key
+            # Помечаем какие модели влезут
+            fits = (user_vram >= m.min_vram_lora_gb) if user_vram else False
+            status_text = (
+                f"✅ влезет ({m.min_vram_lora_gb} GB нужно, у тебя {user_vram:.1f} GB)"
+                if fits else
+                f"⚠️ может не влезть ({m.min_vram_lora_gb} GB нужно)"
+            )
+            status_color = t.success if fits else t.warning
+
+            cards.append(ft.Container(
+                padding=14, border_radius=8,
+                border=ft.border.all(1, t.acc if selected else t.line2),
+                bgcolor=t.acc_soft if selected else t.bg2,
+                content=ft.Column([
+                    ft.Row([
+                        ft.Text(m.title, size=14, weight=ft.FontWeight.W_600,
+                                color=t.fg1),
+                        ft.Container(
+                            padding=ft.padding.symmetric(horizontal=6, vertical=2),
+                            border_radius=3, bgcolor=t.bg3,
+                            content=ft.Text(f"{m.params_b}B · {m.language.upper()}",
+                                            size=9, color=t.fg3,
+                                            font_family="Consolas, monospace"),
+                        ),
+                    ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
+                    ft.Text(m.description, size=11, color=t.fg3),
+                    ft.Text(status_text, size=10, color=status_color,
+                            font_family="Consolas, monospace"),
+                ], spacing=6),
+                on_click=lambda e, k=m.key: self._on_lora_model_selected(k),
+                ink=True,
+            ))
+
+        self.content_panel.content = ft.Column([
+            ft.Text("Выбери базовую LLM", size=24, weight=ft.FontWeight.W_500,
+                    color=t.fg1),
+            ft.Text("Скачается с HuggingFace при первой тренировке (~2-16 GB).",
+                    size=12, color=t.fg3),
+            ft.Container(height=14),
+            ft.Container(
+                padding=12, border_radius=8,
+                border=ft.border.all(1, t.acc), bgcolor=t.acc_soft,
+                content=ft.Column([
+                    ft.Row([
+                        ft.Icon(ft.icons.LIGHTBULB_OUTLINE, color=t.acc, size=16),
+                        ft.Text("Что такое LoRA fine-tuning",
+                                size=12, weight=ft.FontWeight.W_600, color=t.acc),
+                    ], spacing=8),
+                    ft.Text(
+                        "Берём готовую LLM (Qwen/Phi/Llama), замораживаем её веса, "
+                        "добавляем маленькие 'адаптеры' (~1% параметров) и тренируем "
+                        "только их на твоих Q&A данных. За 30-60 минут получаешь "
+                        "ассистента с твоей личностью на базе мощной модели.",
+                        size=11, color=t.fg2),
+                ], spacing=6),
+            ),
+            ft.Container(height=14),
+            ft.Column(cards, spacing=8),
+        ], scroll=ft.ScrollMode.AUTO)
+
+    def _on_lora_model_selected(self, key: str):
+        self.state.lora_base_key = key
+        self.state.lora_model = None
+        self.state.lora_history = []
+        info = lora_mod.get_by_key(key)
+        self._snackbar(f"Выбрана модель: {info.title}")
+        self._show_lora_model_step()
+        self.page.update()
+
+    def _show_lora_data_step(self):
+        """Шаг 2: выбор Q&A датасета (любой .txt в формате '### Question / ### Answer')."""
+        t = self.t
+
+        # Сканим data/texts/ на файлы с Q&A форматом
+        from pathlib import Path
+        txt_dir = Path("data/texts")
+        candidates = []
+        if txt_dir.exists():
+            for f in sorted(txt_dir.glob("*.txt")):
+                try:
+                    text = f.read_text(encoding="utf-8", errors="replace")
+                    n_pairs = text.count("### Question:")
+                    if n_pairs > 0:
+                        candidates.append((f, n_pairs, len(text)))
+                except Exception:
+                    pass
+
+        cards = []
+        if not candidates:
+            cards.append(ft.Container(
+                padding=20, border_radius=8,
+                border=ft.border.all(1, t.line2), bgcolor=t.bg2,
+                content=ft.Column([
+                    ft.Text("Нет Q&A датасетов в data/texts/",
+                            size=13, color=t.fg2),
+                    ft.Text(
+                        "Скачай Alpaca/Dolly через раздел 📝 Текст → Корпус → "
+                        "'Скачать Q&A датасет', или положи свой .txt с парами "
+                        "'### Question: ... ### Answer: ...'.",
+                        size=11, color=t.fg3),
+                ], spacing=8),
+            ))
+        else:
+            for path, n_pairs, size in candidates:
+                sel = self.state.lora_dataset_path == str(path)
+                cards.append(ft.Container(
+                    padding=12, border_radius=6,
+                    border=ft.border.all(1, t.acc if sel else t.line2),
+                    bgcolor=t.acc_soft if sel else t.bg2,
+                    content=ft.Row([
+                        ft.Icon(ft.icons.QUESTION_ANSWER, color=t.acc, size=18),
+                        ft.Column([
+                            ft.Text(path.stem, size=13, weight=ft.FontWeight.W_600,
+                                    color=t.fg1),
+                            ft.Text(f"{n_pairs} Q&A пар · {size//1024} KB",
+                                    size=10, color=t.fg3,
+                                    font_family="Consolas, monospace"),
+                        ], spacing=2, expand=True),
+                    ], spacing=10),
+                    on_click=lambda e, p=path: self._on_lora_data_selected(p),
+                    ink=True,
+                ))
+
+        samples_slider = ft.Slider(
+            min=50, max=5000, divisions=99, value=self.state.lora_max_samples,
+            active_color=t.acc, inactive_color=t.line2, width=400,
+        )
+        samples_label = ft.Text(
+            f"Использовать пар: {self.state.lora_max_samples} (больше = дольше + лучше)",
+            size=12, color=t.fg1,
+        )
+
+        def on_samples_change(e):
+            v = int(e.control.value)
+            self.state.lora_max_samples = v
+            samples_label.value = f"Использовать пар: {v}"
+            self.page.update()
+        samples_slider.on_change = on_samples_change
+
+        self.content_panel.content = ft.Column([
+            ft.Text("Q&A датасет для тренировки", size=24,
+                    weight=ft.FontWeight.W_500, color=t.fg1),
+            ft.Text("Каждая пара — одно «обучение» что после вопроса должен быть "
+                    "такой-то ответ.", size=12, color=t.fg3),
+            ft.Container(height=14),
+            ft.Column(cards, spacing=8),
+            ft.Container(height=20),
+            samples_label, samples_slider,
+        ], scroll=ft.ScrollMode.AUTO)
+
+    def _on_lora_data_selected(self, path):
+        self.state.lora_dataset_path = str(path)
+        self._snackbar(f"Датасет: {path.name}")
+        self._show_lora_data_step()
+        self.page.update()
+
+    def _show_lora_train_step(self):
+        """Шаг 3: тренировка LoRA + chat-интерфейс после."""
+        t = self.t
+        if self.state.lora_base_key is None or self.state.lora_dataset_path is None:
+            self.content_panel.content = ft.Text(
+                "Сначала пройди шаги 1 и 2", color=t.fg3)
+            return
+
+        info = lora_mod.get_by_key(self.state.lora_base_key)
+
+        # === Гиперпараметры ===
+        epochs_label = ft.Text(f"Эпох: {self.state.lora_epochs}",
+                               size=12, color=t.fg1)
+        epochs_slider = ft.Slider(
+            min=1, max=20, divisions=19, value=self.state.lora_epochs,
+            active_color=t.acc, inactive_color=t.line2, width=400,
+            on_change=lambda e: (
+                setattr(self.state, "lora_epochs", int(e.control.value)),
+                setattr(epochs_label, "value", f"Эпох: {int(e.control.value)}"),
+                self.page.update(),
+            ),
+        )
+        r_label = ft.Text(f"LoRA rank: {self.state.lora_r} (больше = больше адаптер, лучше но дольше)",
+                          size=12, color=t.fg1)
+        r_slider = ft.Slider(
+            min=4, max=64, divisions=15, value=self.state.lora_r,
+            active_color=t.acc, inactive_color=t.line2, width=400,
+            on_change=lambda e: (
+                setattr(self.state, "lora_r", int(e.control.value)),
+                setattr(r_label, "value",
+                        f"LoRA rank: {int(e.control.value)} (больше = больше адаптер)"),
+                self.page.update(),
+            ),
+        )
+
+        lr_dropdown = ft.Dropdown(
+            label="learning rate", value=str(self.state.lora_lr),
+            options=[ft.dropdown.Option(v) for v in
+                     ["5e-5", "1e-4", "3e-4", "5e-4", "1e-3"]],
+            on_change=lambda e: setattr(self.state, "lora_lr",
+                                         float(e.control.value)),
+            width=180,
+        )
+        batch_dropdown = ft.Dropdown(
+            label="batch size", value=str(self.state.lora_batch_size),
+            options=[ft.dropdown.Option(v) for v in ["1", "2", "4", "8"]],
+            on_change=lambda e: setattr(self.state, "lora_batch_size",
+                                         int(e.control.value)),
+            width=180,
+        )
+        quant_switch = ft.Switch(
+            label="4-bit квантизация (экономит VRAM, но медленнее)",
+            value=self.state.lora_use_4bit,
+            active_color=t.acc,
+            on_change=lambda e: setattr(self.state, "lora_use_4bit",
+                                         e.control.value),
+        )
+
+        # === Кнопки ===
+        train_btn = ft.FilledButton(
+            text="🚀 Старт LoRA-тренировки",
+            on_click=self._on_lora_train_click,
+            style=ft.ButtonStyle(bgcolor=t.acc, color=t.bg0),
+        )
+        self.lora_train_progress = ft.ProgressBar(
+            visible=False, width=400, color=t.acc)
+        self.lora_train_status = ft.Text(
+            "⚠️ Внимание: первый запуск скачает модель с HuggingFace "
+            "(2-16 GB), занимает 5-30 минут. Тренировка после — ещё 30-60 минут.",
+            size=11, color=t.warning)
+
+        # === Chat panel (показывается после тренировки) ===
+        self.lora_chat_panel = ft.Container(visible=self.state.lora_model is not None)
+        self._rebuild_lora_chat_panel()
+
+        self.content_panel.content = ft.Column([
+            ft.Text("LoRA fine-tuning", size=24, weight=ft.FontWeight.W_500,
+                    color=t.fg1),
+            ft.Text(
+                f"Базовая модель: {info.title} ({info.params_b}B) · "
+                f"данные: {Path(self.state.lora_dataset_path).name}",
+                size=12, color=t.fg3),
+            ft.Container(height=14),
+            ft.Text("Гиперпараметры LoRA", size=13, weight=ft.FontWeight.W_500,
+                    color=t.fg1),
+            epochs_label, epochs_slider,
+            r_label, r_slider,
+            ft.Row([lr_dropdown, batch_dropdown], spacing=12),
+            quant_switch,
+            ft.Container(height=14),
+            train_btn,
+            self.lora_train_progress,
+            self.lora_train_status,
+            ft.Container(height=14),
+            self.lora_chat_panel,
+        ], scroll=ft.ScrollMode.AUTO)
+
+    def _rebuild_lora_chat_panel(self):
+        """Создаёт chat-интерфейс если модель обучена."""
+        if self.state.lora_model is None:
+            return
+        t = self.t
+
+        prompt_field = ft.TextField(
+            label="Вопрос модели", value="Кто тебя создал?",
+            multiline=True, min_lines=2, max_lines=4, width=600,
+            border_color=t.line2, focused_border_color=t.acc,
+        )
+        output_text = ft.Text(
+            "(нажми «Спросить»)",
+            size=13, color=t.fg1, font_family="Consolas, monospace",
+            selectable=True,
+        )
+        gen_status = ft.Text("", size=11, color=t.fg3)
+
+        def on_ask(e):
+            gen_status.value = "Думаю..."
+            output_text.value = ""
+            self.page.update()
+
+            def worker():
+                try:
+                    answer = lora_mod.generate_lora(
+                        self.state.lora_model,
+                        self.state.lora_tokenizer,
+                        prompt_field.value or " ",
+                        max_new=200, temperature=0.7,
+                    )
+                    output_text.value = answer
+                    gen_status.value = f"💬 {len(answer)} символов"
+                except Exception as ex:
+                    output_text.value = f"Ошибка: {ex}"
+                try:
+                    self.page.update()
+                except Exception:
+                    pass
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        ask_btn = ft.FilledButton(
+            text="Спросить", icon=ft.icons.QUESTION_ANSWER,
+            on_click=on_ask,
+            style=ft.ButtonStyle(bgcolor=t.acc, color=t.bg0),
+        )
+
+        self.lora_chat_panel.visible = True
+        self.lora_chat_panel.content = ft.Column([
+            ft.Divider(height=1, color=t.line2),
+            ft.Container(height=10),
+            ft.Text("💬 Чат с обученной моделью", size=15,
+                    weight=ft.FontWeight.W_600, color=t.fg1),
+            ft.Text(f"Адаптер сохранён в: {self.state.lora_adapter_path}",
+                    size=10, color=t.fg4, font_family="Consolas, monospace"),
+            ft.Container(height=10),
+            prompt_field,
+            ft.Container(height=8),
+            ft.Row([ask_btn, gen_status], spacing=14),
+            ft.Container(height=10),
+            ft.Container(
+                padding=14, border_radius=8,
+                border=ft.border.all(1, t.line2), bgcolor=t.bg1,
+                content=output_text,
+            ),
+        ], spacing=4)
+
+    def _on_lora_train_click(self, e):
+        """Запуск LoRA-тренировки в фоновом потоке."""
+        t = self.t
+        info = lora_mod.get_by_key(self.state.lora_base_key)
+
+        # Парсим Q&A пары
+        try:
+            raw = Path(self.state.lora_dataset_path).read_text(encoding="utf-8")
+        except Exception as ex:
+            self._snackbar(f"Ошибка чтения данных: {ex}")
+            return
+        pairs = []
+        blocks = raw.split("### Question:")
+        for block in blocks[1:]:
+            if "### Answer:" not in block:
+                continue
+            q, a = block.split("### Answer:", 1)
+            a = a.split("### Question:", 1)[0]
+            pairs.append((q.strip(), a.strip()))
+        if self.state.lora_max_samples > 0:
+            pairs = pairs[:self.state.lora_max_samples]
+        if not pairs:
+            self._snackbar("Не найдено Q&A пар в датасете")
+            return
+
+        cfg = lora_mod.LoraTrainConfig(
+            lora_r=self.state.lora_r,
+            lora_alpha=self.state.lora_r * 2,
+            epochs=self.state.lora_epochs,
+            batch_size=self.state.lora_batch_size,
+            learning_rate=self.state.lora_lr,
+            use_4bit=self.state.lora_use_4bit,
+        )
+
+        self.lora_train_progress.visible = True
+        self.lora_train_status.value = "🔽 Скачиваю модель с HuggingFace..."
+        self.lora_train_status.color = self.c("acc")
+        self.page.update()
+
+        def on_epoch(stats):
+            self.lora_train_status.value = (
+                f"Эпоха {stats.epoch}/{cfg.epochs} · "
+                f"loss={stats.train_loss:.4f} · {stats.elapsed_sec:.1f}с\n"
+                f"→ {stats.sample[:80]}"
+            )
+            try:
+                self.page.update()
+            except Exception:
+                pass
+
+        def worker():
+            try:
+                model, tokenizer, history = lora_mod.train_lora(
+                    info, pairs, cfg, on_epoch=on_epoch)
+                self.state.lora_model = model
+                self.state.lora_tokenizer = tokenizer
+                self.state.lora_history = history
+
+                # Авто-сейв адаптера
+                from pathlib import Path as _P
+                import time as _t
+                adapter_path = _P("models") / f"lora_{info.key}_{int(_t.time())}"
+                lora_mod.save_lora_adapter(model, adapter_path)
+                self.state.lora_adapter_path = str(adapter_path)
+
+                final = history[-1]
+                self.lora_train_status.value = (
+                    f"✅ Готово! Финальный loss: {final.train_loss:.4f} · "
+                    f"{final.elapsed_sec:.1f}с\n"
+                    f"💾 Адаптер: {adapter_path}"
+                )
+                self.lora_train_status.color = self.c("success")
+                self._rebuild_lora_chat_panel()
+            except Exception as ex:
+                self.lora_train_status.value = f"❌ Ошибка: {ex}"
+                self.lora_train_status.color = self.c("danger")
+            finally:
+                self.lora_train_progress.visible = False
+                try:
+                    self.page.update()
+                except Exception:
+                    pass
+
+        threading.Thread(target=worker, daemon=True).start()
 
     # ================== ТЕКСТОВЫЙ РЕЖИМ ==================
 
