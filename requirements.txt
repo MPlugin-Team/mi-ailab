@@ -12,3 +12,9 @@ torch>=2.2.0
 torchvision>=0.17.0    # для MNIST/Fashion-MNIST в режиме CNN
 Pillow>=10.0.0          # для рендеринга тест-картинок в UI
 tokenizers>=0.15.0      # BPE-токенайзер (как у GPT/Llama)
+transformers>=4.40.0    # для LoRA fine-tuning готовых LLM
+peft>=0.10.0            # сами LoRA-адаптеры
+accelerate>=0.30.0      # для distributed/4-bit
+pyyaml>=6.0             # для CLI-конфигов
+# bitsandbytes — опционально для 4-bit квантизации (только Linux/WSL,
+# на Windows ставится сложно; без него LoRA работает в FP16)

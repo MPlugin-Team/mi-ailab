@@ -27,6 +27,7 @@ from src import text_model as tm
 from src import transformer_model as tform
 from src import model_storage as ms
 from src import hardware as hw
+from src import instruction_datasets as ids
 
 
 # === Загрузка конфига (YAML или прямые CLI-флаги) ===
@@ -207,6 +208,104 @@ def cmd_list_corpora(args):
     return 0
 
 
+def cmd_lora(args):
+    """LoRA fine-tuning готовой LLM на Q&A данных."""
+    from src import lora_finetune as lora
+
+    # Список моделей
+    if args.list:
+        print(f"{'KEY':<14} {'TITLE':<30} {'PARAMS':<8} {'VRAM (lora)':<12} LANG")
+        print("-" * 80)
+        for m in lora.list_pretrained():
+            print(f"{m.key:<14} {m.title[:28]:<30} "
+                  f"{m.params_b}B    {m.min_vram_lora_gb} GB        {m.language}")
+        return 0
+
+    info = lora.get_by_key(args.model)
+    if info is None:
+        print(f"ERROR: модель '{args.model}' не найдена. Используй --list")
+        return 1
+
+    # Грузим Q&A данные из текстового файла (Alpaca-формат-corpus)
+    print(f"=== Mi-AiLab LoRA fine-tuning ===")
+    print(f"Base model: {info.title} ({info.params_b}B params)")
+    print(f"Min VRAM:   {info.min_vram_lora_gb} GB")
+
+    dataset_path = Path(args.data)
+    if not dataset_path.exists():
+        print(f"ERROR: данные не найдены: {dataset_path}")
+        return 1
+
+    raw = dataset_path.read_text(encoding="utf-8")
+    pairs = []
+    # Парсим ### Question / ### Answer формат
+    blocks = raw.split("### Question:")
+    for block in blocks[1:]:
+        if "### Answer:" not in block:
+            continue
+        q, a = block.split("### Answer:", 1)
+        # Обрезаем на следующем Question (если есть в a)
+        a = a.split("### Question:", 1)[0]
+        pairs.append((q.strip(), a.strip()))
+
+    if not pairs:
+        print(f"ERROR: не найдено Q&A пар в {dataset_path}")
+        return 1
+    print(f"Q&A pairs:  {len(pairs)}")
+
+    if args.max_samples > 0:
+        pairs = pairs[:args.max_samples]
+        print(f"  ограничено до {args.max_samples}")
+
+    cfg = lora.LoraTrainConfig(
+        lora_r=args.lora_r,
+        lora_alpha=args.lora_r * 2,
+        epochs=args.epochs,
+        batch_size=args.batch,
+        learning_rate=args.lr,
+        max_seq_len=args.max_seq_len,
+        use_4bit=not args.no_4bit,
+    )
+
+    def on_epoch(stats):
+        print(f"  epoch {stats.epoch} · loss={stats.train_loss:.4f}"
+              f" · {stats.elapsed_sec:.1f}s")
+        print(f"    sample: {stats.sample[:120]}")
+
+    model, tokenizer, history = lora.train_lora(info, pairs, cfg, on_epoch=on_epoch)
+
+    # Сохраняем адаптер
+    adapter_dir = Path(args.output)
+    path = lora.save_lora_adapter(model, adapter_dir)
+    print(f"\n=== Done ===")
+    print(f"Adapter saved to: {path}")
+    print(f"Size: {sum(f.stat().st_size for f in path.rglob('*')) / 1024 / 1024:.1f} MB")
+    print(f"\nTo use:")
+    print(f"  py cli.py lora-generate --model {info.key} --adapter {path} --prompt 'YOUR QUESTION'")
+    return 0
+
+
+def cmd_lora_generate(args):
+    """Генерация с LoRA-адаптером."""
+    from src import lora_finetune as lora
+    info = lora.get_by_key(args.model)
+    if info is None:
+        print(f"ERROR: модель '{args.model}' не найдена")
+        return 1
+
+    print(f"Loading {info.title} + adapter {args.adapter}...")
+    model, tokenizer = lora.load_lora_adapter(info, args.adapter,
+                                               use_4bit=not args.no_4bit)
+    print()
+    print(f"Q: {args.prompt}")
+    print("-" * 50)
+    answer = lora.generate_lora(model, tokenizer, args.prompt,
+                                 max_new=args.length, temperature=args.temperature)
+    print(f"A: {answer}")
+    print("-" * 50)
+    return 0
+
+
 def cmd_hardware(args):
     info = hw.detect_hardware()
     print(f"OS:       {info.os_name}")
@@ -274,6 +373,38 @@ def build_parser():
     ph = sub.add_parser("hardware", help="Информация о железе + опционально бенчмарк")
     ph.add_argument("--benchmark", action="store_true")
     ph.set_defaults(func=cmd_hardware)
+
+    # lora-finetune
+    pl = sub.add_parser("lora-finetune",
+                         help="LoRA fine-tuning готовой LLM на Q&A данных")
+    pl.add_argument("--list", action="store_true",
+                    help="Показать список доступных моделей и выйти")
+    pl.add_argument("--model", default="qwen2_0.5b",
+                    help="Ключ базовой модели (см. --list)")
+    pl.add_argument("--data", default="data/texts/alpaca_clean.txt",
+                    help="Файл с Q&A в формате '### Question:...### Answer:...'")
+    pl.add_argument("--epochs", type=int, default=3)
+    pl.add_argument("--batch", type=int, default=4)
+    pl.add_argument("--lr", type=float, default=1e-4)
+    pl.add_argument("--lora-r", type=int, default=8, help="LoRA rank")
+    pl.add_argument("--max-seq-len", type=int, default=512)
+    pl.add_argument("--max-samples", type=int, default=1000,
+                    help="Ограничить число Q&A пар (0 = все)")
+    pl.add_argument("--no-4bit", action="store_true",
+                    help="Не использовать 4-bit квантизацию (нужно больше VRAM)")
+    pl.add_argument("--output", default="models/lora_adapter",
+                    help="Куда сохранить адаптер")
+    pl.set_defaults(func=cmd_lora)
+
+    # lora-generate
+    plg = sub.add_parser("lora-generate", help="Генерация с LoRA-адаптером")
+    plg.add_argument("--model", required=True, help="Ключ базовой модели")
+    plg.add_argument("--adapter", required=True, help="Путь к LoRA-адаптеру")
+    plg.add_argument("--prompt", required=True)
+    plg.add_argument("--length", type=int, default=200)
+    plg.add_argument("--temperature", type=float, default=0.7)
+    plg.add_argument("--no-4bit", action="store_true")
+    plg.set_defaults(func=cmd_lora_generate)
 
     return p
 
