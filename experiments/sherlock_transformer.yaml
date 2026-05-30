@@ -1,0 +1,25 @@
+# Пример конфига для Mi-AiLab CLI
+# Запуск: py cli.py train --config experiments/sherlock_transformer.yaml
+#
+# Это серьёзная тренировка — Mini-Transformer 3.6M параметров на Sherlock Holmes,
+# 500 эпох с BPE-токенайзером. На RTX 4050 займёт ~30-50 минут.
+
+corpus: sherlock              # из data/texts/sherlock.txt
+
+arch: transformer             # lstm | transformer
+hidden: 256                   # для transformer = n_embd
+num_layers: 4
+n_head: 4
+
+seq_len: 256                  # длина контекста
+batch_size: 32
+
+epochs: 500
+learning_rate: 0.0005
+dropout: 0.1
+
+tokenizer: bpe                # char | bpe — BPE даёт более качественную генерацию
+bpe_vocab: 4000
+
+device: auto                  # auto | cpu | cuda
+checkpoint_every: 20          # автосейв каждые 20 эпох
