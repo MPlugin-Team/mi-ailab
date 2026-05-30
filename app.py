@@ -2408,6 +2408,8 @@ class App:
                 dropout=self.state.text_dropout,
                 optimizer=self.state.text_optimizer,
                 device=self.state.device,
+                mixed_precision=True,         # FP16 — бесплатное 2x ускорение на GPU
+                checkpoint_every=10,          # автосейв каждые 10 эпох
             )
         text = self.state.text_corpus.text
         epoch_offset = self.state.text_history[-1].epoch if (is_continue and self.state.text_history) else 0

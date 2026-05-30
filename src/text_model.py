@@ -62,6 +62,9 @@ class TextTrainConfig:
     device: str = "auto"         # "auto" | "cpu" | "cuda"
     grad_clip: float = 1.0       # 0 = выключить
     weight_decay: float = 0.0    # L2-регуляризация
+    mixed_precision: bool = False  # FP16 — 2x ускорение на GPU
+    checkpoint_every: int = 0    # 0 = выкл, иначе сохранять каждые N эпох
+    checkpoint_dir: str = "models/_checkpoints"
 
 
 @dataclass
@@ -180,6 +183,16 @@ def train_text(
                           cfg.learning_rate, cfg.weight_decay)
     loss_fn = nn.CrossEntropyLoss()
 
+    # Mixed precision только на CUDA — на CPU FP16 не даёт ускорения
+    use_amp = cfg.mixed_precision and device.type == "cuda"
+    scaler = torch.amp.GradScaler("cuda") if use_amp else None
+
+    # Папка для чекпойнтов
+    if cfg.checkpoint_every > 0:
+        from pathlib import Path as _P
+        ckpt_dir = _P(cfg.checkpoint_dir)
+        ckpt_dir.mkdir(parents=True, exist_ok=True)
+
     history: list[TextEpochStats] = []
     t0 = time.time()
 
@@ -197,15 +210,29 @@ def train_text(
             yb = torch.stack([data[p + 1:p + cfg.seq_len + 1] for p in batch_pos])
 
             opt.zero_grad()
-            logits, _ = model(xb)
-            loss = loss_fn(
-                logits.reshape(-1, tokenizer.vocab_size),
-                yb.reshape(-1),
-            )
-            loss.backward()
-            if cfg.grad_clip > 0:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
-            opt.step()
+            if use_amp:
+                with torch.amp.autocast("cuda", dtype=torch.float16):
+                    logits, _ = model(xb)
+                    loss = loss_fn(
+                        logits.reshape(-1, tokenizer.vocab_size),
+                        yb.reshape(-1),
+                    )
+                scaler.scale(loss).backward()
+                if cfg.grad_clip > 0:
+                    scaler.unscale_(opt)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
+                scaler.step(opt)
+                scaler.update()
+            else:
+                logits, _ = model(xb)
+                loss = loss_fn(
+                    logits.reshape(-1, tokenizer.vocab_size),
+                    yb.reshape(-1),
+                )
+                loss.backward()
+                if cfg.grad_clip > 0:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
+                opt.step()
 
             running += loss.item()
             n_batches += 1
@@ -224,6 +251,21 @@ def train_text(
         history.append(stats)
         if on_epoch:
             on_epoch(stats)
+
+        # Авто-чекпойнт: каждые N эпох сохраняем веса в models/_checkpoints/.
+        # Это спасает многочасовую тренировку от внезапного падения.
+        if cfg.checkpoint_every > 0 and (epoch % cfg.checkpoint_every == 0):
+            try:
+                from src import model_storage as _ms
+                ckpt_name = f"_autosave_lstm_epoch_{epoch + epoch_offset}.pt"
+                _ms.save_lstm(
+                    model.cpu(), title=f"autosave epoch {epoch + epoch_offset}",
+                    corpus_name="auto", history=history,
+                    filename=ckpt_name,
+                )
+                model.to(device)  # вернём обратно после .cpu() для сохранения
+            except Exception as _e:
+                print(f"[checkpoint] failed: {_e}")
 
     return model, history
 
