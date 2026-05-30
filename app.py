@@ -30,6 +30,7 @@ from src import model_storage as ms
 from src import cnn_model as cm
 from src import image_datasets as imds
 from src import tooltips as tips
+from src import transformer_model as tform
 
 
 # === Общее состояние приложения ===
@@ -64,10 +65,12 @@ class AppState:
     nn_history: list[nn.EpochStats] = field(default_factory=list)
     feature_columns: list[str] = field(default_factory=list)
 
-    # === Text generation (char-LSTM) ===
+    # === Text generation (char-LSTM или Mini-Transformer) ===
     text_corpus: tds.TextCorpus | None = None
-    text_hidden_size: int = 256
-    text_num_layers: int = 2
+    text_arch: str = "lstm"        # "lstm" | "transformer"
+    text_hidden_size: int = 256    # для LSTM: hidden; для transformer: n_embd
+    text_num_layers: int = 2       # для LSTM: layers; для transformer: n_layer
+    text_n_head: int = 4           # только для transformer
     text_embed_size: int = 64
     text_seq_len: int = 100
     text_epochs: int = 20
@@ -75,8 +78,8 @@ class AppState:
     text_lr: float = 0.003
     text_dropout: float = 0.2
     text_optimizer: str = "adam"
-    text_model: tm.CharLSTM | None = None
-    text_history: list[tm.TextEpochStats] = field(default_factory=list)
+    text_model: tm.CharLSTM | tform.MiniGPT | None = None
+    text_history: list = field(default_factory=list)   # mix of TextEpochStats / TransformerEpochStats
 
     # === Hardware (мой комп) ===
     hardware_info: hw.HardwareInfo | None = None
@@ -2024,6 +2027,18 @@ class App:
             size=12, color=self.c("acc"), weight=ft.FontWeight.W_500,
         )
 
+        # === Выбор архитектуры ===
+        arch_dropdown = ft.Dropdown(
+            label="Архитектура",
+            value=self.state.text_arch,
+            options=[
+                ft.dropdown.Option("lstm", "LSTM (классика 2015, лёгкая)"),
+                ft.dropdown.Option("transformer", "Mini-Transformer (как GPT, мощнее)"),
+            ],
+            on_change=lambda e: self._on_text_arch_changed(e.control.value),
+            width=380,
+        )
+
         # Гиперпараметры
         hidden_label = ft.Text(f"Hidden size (нейронов LSTM): {self.state.text_hidden_size}",
                                size=12, color=self.c("fg1"))
@@ -2124,6 +2139,8 @@ class App:
             ft.Container(height=14),
             self._preset_row(tips.TEXT_PRESETS, self._apply_text_preset),
             ft.Container(height=14),
+            arch_dropdown,
+            ft.Container(height=10),
             ft.Row([
                 ft.Text("Архитектура", size=13, weight=ft.FontWeight.W_500, color=self.c("fg1")),
                 self._tip("hidden_size_lstm"),
@@ -2258,6 +2275,19 @@ class App:
             return
         self._run_text_training(existing_model=self.state.text_model)
 
+    def _on_text_arch_changed(self, arch: str):
+        if arch == self.state.text_arch:
+            return
+        self.state.text_arch = arch
+        # При смене архитектуры сбрасываем модель — несовместимые веса
+        self.state.text_model = None
+        self.state.text_history = []
+        self._snackbar(
+            "Архитектура: " + ("Mini-Transformer (GPT-style)" if arch == "transformer"
+                               else "LSTM (классика)"))
+        self._show_text_train_step()
+        self.page.update()
+
     def _on_text_save_click(self, e):
         if self.state.text_model is None:
             self._snackbar("Нет обученной модели")
@@ -2291,18 +2321,33 @@ class App:
         self.text_train_status.value = "Подготовка..."
         self.page.update()
 
-        cfg = tm.TextTrainConfig(
-            hidden_size=self.state.text_hidden_size,
-            num_layers=self.state.text_num_layers,
-            embed_size=self.state.text_embed_size,
-            seq_len=self.state.text_seq_len,
-            batch_size=self.state.text_batch_size,
-            epochs=self.state.text_epochs,
-            learning_rate=self.state.text_lr,
-            dropout=self.state.text_dropout,
-            optimizer=self.state.text_optimizer,
-            device=self.state.device,
-        )
+        is_transformer = self.state.text_arch == "transformer"
+        if is_transformer:
+            # Transformer: hidden_size → n_embd, num_layers → n_layer
+            cfg = tform.TransformerTrainConfig(
+                n_layer=self.state.text_num_layers,
+                n_head=self.state.text_n_head,
+                n_embd=self.state.text_hidden_size,
+                seq_len=self.state.text_seq_len,
+                batch_size=self.state.text_batch_size,
+                epochs=self.state.text_epochs,
+                learning_rate=self.state.text_lr,
+                dropout=self.state.text_dropout,
+                device=self.state.device,
+            )
+        else:
+            cfg = tm.TextTrainConfig(
+                hidden_size=self.state.text_hidden_size,
+                num_layers=self.state.text_num_layers,
+                embed_size=self.state.text_embed_size,
+                seq_len=self.state.text_seq_len,
+                batch_size=self.state.text_batch_size,
+                epochs=self.state.text_epochs,
+                learning_rate=self.state.text_lr,
+                dropout=self.state.text_dropout,
+                optimizer=self.state.text_optimizer,
+                device=self.state.device,
+            )
         text = self.state.text_corpus.text
         epoch_offset = self.state.text_history[-1].epoch if (is_continue and self.state.text_history) else 0
 
@@ -2339,10 +2384,16 @@ class App:
 
         def worker():
             try:
-                model, history = tm.train_text(
-                    text, cfg, on_epoch=on_epoch,
-                    existing_model=existing_model, epoch_offset=epoch_offset,
-                )
+                if is_transformer:
+                    model, history = tform.train_transformer(
+                        text, cfg, on_epoch=on_epoch,
+                        existing_model=existing_model, epoch_offset=epoch_offset,
+                    )
+                else:
+                    model, history = tm.train_text(
+                        text, cfg, on_epoch=on_epoch,
+                        existing_model=existing_model, epoch_offset=epoch_offset,
+                    )
                 self.state.text_model = model
                 self.state.text_history.extend(history)
                 final = history[-1]
@@ -2422,12 +2473,21 @@ class App:
 
             def worker():
                 try:
-                    result = tm.generate_text(
-                        model,
-                        prompt=prompt_field.value or " ",
-                        max_chars=int(max_chars_slider.value),
-                        temperature=float(temperature_slider.value),
-                    )
+                    # Dispatch на нужный generator в зависимости от типа модели
+                    if isinstance(model, tform.MiniGPT):
+                        result = tform.generate_transformer(
+                            model,
+                            prompt=prompt_field.value or " ",
+                            max_chars=int(max_chars_slider.value),
+                            temperature=float(temperature_slider.value),
+                        )
+                    else:
+                        result = tm.generate_text(
+                            model,
+                            prompt=prompt_field.value or " ",
+                            max_chars=int(max_chars_slider.value),
+                            temperature=float(temperature_slider.value),
+                        )
                     output_text.value = result
                     gen_status.value = f"Готово · {len(result)} символов"
                 except Exception as ex:
