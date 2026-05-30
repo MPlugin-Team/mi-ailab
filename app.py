@@ -24,6 +24,7 @@ from src import datasets as ds
 from src import neural_net as nn
 from src import text_datasets as tds
 from src import text_model as tm
+from src import hardware as hw
 
 
 # === Общее состояние приложения ===
@@ -31,10 +32,13 @@ from src import text_model as tm
 @dataclass
 class AppState:
     """Шарится между экранами через App.state."""
-    # Активный режим: "regression" (табличные данные, MLP) или "text" (char-LSTM)
-    mode: str = "regression"
+    # Активный режим: "hardware" | "regression" | "text"
+    mode: str = "hardware"
 
-    # === Регрессия (старый Mi-AiLab) ===
+    # Глобальный выбор устройства — применяется к обоим режимам тренировки
+    device: str = "auto"   # "auto" | "cpu" | "cuda"
+
+    # === Регрессия (MLP) ===
     dataset: ds.LoadedDataset | None = None
     target_column: str | None = None
     task_type: str | None = None
@@ -44,6 +48,9 @@ class AppState:
     batch_size: int = 32
     normalize: bool = True
     lr_schedule: bool = True
+    optimizer: str = "adam"
+    dropout: float = 0.0
+    weight_decay: float = 0.0
     nn_model: nn.MlpRegressor | None = None
     nn_history: list[nn.EpochStats] = field(default_factory=list)
     feature_columns: list[str] = field(default_factory=list)
@@ -57,8 +64,14 @@ class AppState:
     text_epochs: int = 20
     text_batch_size: int = 64
     text_lr: float = 0.003
+    text_dropout: float = 0.2
+    text_optimizer: str = "adam"
     text_model: tm.CharLSTM | None = None
     text_history: list[tm.TextEpochStats] = field(default_factory=list)
+
+    # === Hardware (мой комп) ===
+    hardware_info: hw.HardwareInfo | None = None
+    last_benchmark: hw.BenchmarkResult | None = None
 
 
 # === Главное окно ===
@@ -111,6 +124,8 @@ class App:
     # Шаги в каждом режиме: (label, метод-рендерер)
     @property
     def _steps_for_mode(self) -> list[tuple[str, str]]:
+        if self.state.mode == "hardware":
+            return [("Инфо + бенчмарк", "_show_hardware_step")]
         if self.state.mode == "text":
             return [
                 ("Корпус", "_show_corpus_step"),
@@ -126,6 +141,7 @@ class App:
     def _rebuild_sidebar(self):
         # Mode tabs
         self.mode_tabs_container.controls = [
+            self._mode_tab("hardware", "🖥️ Моя машина"),
             self._mode_tab("regression", "📊 Регрессия"),
             self._mode_tab("text", "📝 Текст (LSTM)"),
         ]
@@ -181,7 +197,6 @@ class App:
         )
 
     def _goto_step(self, idx: int):
-        # Гарды на пропуск шагов
         if self.state.mode == "regression":
             if idx == 1 and (self.state.dataset is None or self.state.target_column is None):
                 self._snackbar("Сначала выбери датасет и target-колонку")
@@ -189,13 +204,14 @@ class App:
             if idx == 2 and self.state.nn_model is None:
                 self._snackbar("Сначала обучи нейросеть в шаге 'Обучение'")
                 return
-        else:  # text
+        elif self.state.mode == "text":
             if idx == 1 and self.state.text_corpus is None:
                 self._snackbar("Сначала выбери текстовый корпус")
                 return
             if idx == 2 and self.state.text_model is None:
                 self._snackbar("Сначала обучи LSTM в шаге 'Обучение'")
                 return
+        # hardware mode — нет гардов, всего 1 шаг
 
         self.current_step = idx
         self._rebuild_sidebar()
@@ -527,9 +543,12 @@ class App:
             epochs=self.state.epochs,
             batch_size=self.state.batch_size,
             learning_rate=self.state.learning_rate,
-            optimizer="adam",
+            optimizer=self.state.optimizer,
             normalize=self.state.normalize,
             lr_schedule=self.state.lr_schedule,
+            device=self.state.device,
+            dropout=self.state.dropout,
+            weight_decay=self.state.weight_decay,
         )
         epoch_offset = self.state.nn_history[-1].epoch if (is_continue and self.state.nn_history) else 0
 
@@ -805,6 +824,204 @@ class App:
                 ], spacing=4),
             ),
         ], scroll=ft.ScrollMode.AUTO)
+
+    # ================== HARDWARE РЕЖИМ ==================
+
+    def _show_hardware_step(self):
+        # Кэшируем результат — не пересобираем при каждом переходе
+        if self.state.hardware_info is None:
+            self.state.hardware_info = hw.detect_hardware()
+        info = self.state.hardware_info
+        recs = hw.make_recommendations(info)
+
+        # === Карточки железа ===
+        def info_card(title: str, lines: list[tuple[str, str]],
+                      accent: str = "#00E5FF") -> ft.Container:
+            rows = []
+            for label, value in lines:
+                rows.append(ft.Row([
+                    ft.Text(label, size=12, color="#8B8D93", width=140),
+                    ft.Text(value, size=13, color="#F2F3F5",
+                            weight=ft.FontWeight.W_500, selectable=True),
+                ], spacing=8))
+            return ft.Container(
+                padding=16, border_radius=12,
+                border=ft.border.all(1, "#2B2D31"), bgcolor="#232428",
+                content=ft.Column([
+                    ft.Text(title, size=14, weight=ft.FontWeight.W_600, color=accent),
+                    ft.Container(height=8),
+                    *rows,
+                ], spacing=6),
+                expand=True,
+            )
+
+        cpu_card = info_card("🖥️ CPU + Система", [
+            ("OS", info.os_name),
+            ("Процессор", info.cpu_name or "Unknown"),
+            ("Ядер физических", str(info.cpu_cores)),
+            ("Потоков", str(info.cpu_threads)),
+            ("RAM", f"{info.ram_gb:.1f} GB"),
+            ("Python", info.python_version),
+            ("PyTorch", info.torch_version),
+        ])
+
+        gpu_lines = []
+        if info.has_gpu:
+            gpu_lines = [
+                ("Видеокарта", info.gpu_name),
+                ("VRAM", f"{info.gpu_vram_gb:.1f} GB" if info.gpu_vram_gb else "?"),
+                ("CUDA", info.cuda_version or "?"),
+                ("GPU count", str(info.gpu_count)),
+                ("Доступно для тренировки", "✅ ДА"),
+            ]
+            gpu_accent = "#3FBE6E"
+        else:
+            gpu_lines = [
+                ("GPU", "не обнаружено или PyTorch собран без CUDA"),
+                ("CUDA", "недоступно"),
+                ("Доступно для тренировки", "❌ только CPU"),
+                ("Совет", "pip install torch --index-url https://download.pytorch.org/whl/cu121"),
+            ]
+            gpu_accent = "#E5A23E"
+        gpu_card = info_card("🎮 GPU", gpu_lines, accent=gpu_accent)
+
+        # === Глобальный выбор устройства ===
+        device_options = [ft.dropdown.Option("auto", "Авто (предпочитать GPU)")]
+        device_options.append(ft.dropdown.Option("cpu", "CPU"))
+        if info.has_gpu:
+            device_options.append(ft.dropdown.Option("cuda", f"GPU: {info.gpu_name}"))
+        device_dropdown = ft.Dropdown(
+            label="Устройство для тренировки (применяется ко всем моделям)",
+            value=self.state.device,
+            options=device_options,
+            on_change=lambda e: setattr(self.state, "device", e.control.value),
+            width=500,
+        )
+
+        # === Бенчмарк ===
+        self.bench_button = ft.FilledButton(
+            text="Запустить бенчмарк", icon=ft.icons.SPEED,
+            style=ft.ButtonStyle(bgcolor="#00E5FF", color="#051518"),
+            on_click=self._on_benchmark_click,
+        )
+        self.bench_progress = ft.ProgressBar(visible=False, width=400, color="#00E5FF")
+        self.bench_result_box = ft.Container(
+            padding=14, border_radius=10,
+            border=ft.border.all(1, "#2B2D31"), bgcolor="#1A1B1E",
+            content=self._render_bench_result(self.state.last_benchmark),
+        )
+
+        # === Рекомендации ===
+        rec_rows = [
+            ft.Row([ft.Text("Тип модели", size=11, color="#8B8D93", width=200),
+                    ft.Text("Макс. параметров (рекомендуется)", size=11, color="#8B8D93")]),
+            ft.Divider(height=1, color="#2B2D31"),
+            ft.Row([ft.Text("MLP (регрессия)", size=12, color="#F2F3F5", width=200),
+                    ft.Text(f"≈ {recs.max_mlp_params:,}".replace(",", " "),
+                            size=12, color="#00E5FF")]),
+            ft.Row([ft.Text("LSTM (текст)", size=12, color="#F2F3F5", width=200),
+                    ft.Text(f"≈ {recs.max_lstm_params:,}".replace(",", " "),
+                            size=12, color="#00E5FF")]),
+            ft.Row([ft.Text("CNN (картинки)", size=12, color="#F2F3F5", width=200),
+                    ft.Text(f"≈ {recs.max_cnn_params:,}".replace(",", " "),
+                            size=12, color="#00E5FF")]),
+            ft.Row([ft.Text("Mini-Transformer", size=12, color="#F2F3F5", width=200),
+                    ft.Text("✅ потянет" if recs.can_train_transformer else "⚠️ слабо",
+                            size=12, color="#3FBE6E" if recs.can_train_transformer else "#E5A23E")]),
+        ]
+        for note in recs.notes:
+            rec_rows.append(ft.Text(note, size=11, color="#8B8D93", italic=True))
+
+        rec_card = ft.Container(
+            padding=16, border_radius=12,
+            border=ft.border.all(1, "#2B2D31"), bgcolor="#232428",
+            content=ft.Column([
+                ft.Text("🎯 Что твой комп потянет",
+                        size=14, weight=ft.FontWeight.W_600, color="#00E5FF"),
+                ft.Container(height=8),
+                *rec_rows,
+            ], spacing=6),
+        )
+
+        self.content_panel.content = ft.Column([
+            ft.Text("Моя машина", size=24, weight=ft.FontWeight.W_500, color="#F2F3F5"),
+            ft.Text("Что у тебя за железо и что оно сможет в Mi-AiLab.",
+                    size=13, color="#8B8D93"),
+            ft.Container(height=14),
+            ft.Row([cpu_card, gpu_card], spacing=14),
+            ft.Container(height=14),
+            device_dropdown,
+            ft.Container(height=14),
+            ft.Text("⚡ Бенчмарк", size=15, weight=ft.FontWeight.W_600, color="#F2F3F5"),
+            ft.Text("Тренирует мини-MLP 100 итераций и меряет скорость. "
+                    "Сравни CPU vs GPU.", size=11, color="#8B8D93"),
+            ft.Container(height=6),
+            ft.Row([self.bench_button, self.bench_progress], spacing=14),
+            ft.Container(height=8),
+            self.bench_result_box,
+            ft.Container(height=14),
+            rec_card,
+        ], scroll=ft.ScrollMode.AUTO)
+
+    def _render_bench_result(self, result: hw.BenchmarkResult | None) -> ft.Control:
+        if result is None:
+            return ft.Text("(нажми «Запустить бенчмарк»)",
+                           size=11, color="#5A5C63", italic=True)
+        score_color = (
+            "#3FBE6E" if result.score >= 1000 else
+            "#00E5FF" if result.score >= 300 else
+            "#E5A23E" if result.score >= 100 else
+            "#E5484D"
+        )
+        return ft.Column([
+            ft.Row([
+                ft.Text("Устройство:", size=12, color="#8B8D93", width=150),
+                ft.Text(result.device.upper(), size=14, color="#F2F3F5",
+                        weight=ft.FontWeight.W_600),
+            ]),
+            ft.Row([
+                ft.Text("Время:", size=12, color="#8B8D93", width=150),
+                ft.Text(f"{result.elapsed_sec:.3f} сек на {result.iterations} итераций",
+                        size=12, color="#F2F3F5"),
+            ]),
+            ft.Row([
+                ft.Text("Throughput:", size=12, color="#8B8D93", width=150),
+                ft.Text(f"{result.samples_per_sec:,.0f} samples/sec".replace(",", " "),
+                        size=12, color="#F2F3F5"),
+            ]),
+            ft.Row([
+                ft.Text("Score:", size=12, color="#8B8D93", width=150),
+                ft.Text(f"{result.score}", size=18, color=score_color,
+                        weight=ft.FontWeight.W_700),
+                ft.Text("(чем больше тем лучше)", size=11, color="#5A5C63"),
+            ], spacing=8),
+        ], spacing=4)
+
+    def _on_benchmark_click(self, e):
+        self.bench_button.disabled = True
+        self.bench_progress.visible = True
+        self.bench_result_box.content = ft.Text("Тренирую...", size=12, color="#8B8D93")
+        self.page.update()
+
+        device = self.state.device
+
+        def worker():
+            try:
+                result = hw.run_benchmark(device=device)
+                self.state.last_benchmark = result
+                self.bench_result_box.content = self._render_bench_result(result)
+            except Exception as ex:
+                self.bench_result_box.content = ft.Text(
+                    f"Ошибка бенчмарка: {ex}", size=12, color="#E5484D")
+            finally:
+                self.bench_button.disabled = False
+                self.bench_progress.visible = False
+                try:
+                    self.page.update()
+                except Exception:
+                    pass
+
+        threading.Thread(target=worker, daemon=True).start()
 
     # ================== ТЕКСТОВЫЙ РЕЖИМ ==================
 
@@ -1090,6 +1307,9 @@ class App:
             batch_size=self.state.text_batch_size,
             epochs=self.state.text_epochs,
             learning_rate=self.state.text_lr,
+            dropout=self.state.text_dropout,
+            optimizer=self.state.text_optimizer,
+            device=self.state.device,
         )
         text = self.state.text_corpus.text
         epoch_offset = self.state.text_history[-1].epoch if (is_continue and self.state.text_history) else 0

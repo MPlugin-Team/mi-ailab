@@ -35,9 +35,19 @@ class TrainConfig:
     epochs: int = 100
     batch_size: int = 32
     learning_rate: float = 0.01
-    optimizer: str = "adam"      # "adam" | "sgd"
+    optimizer: str = "adam"      # "adam" | "adamw" | "sgd" | "rmsprop"
     normalize: bool = False      # стандартизация X и y
     lr_schedule: bool = False    # CosineAnnealingLR
+    device: str = "auto"         # "auto" | "cpu" | "cuda"
+    weight_decay: float = 0.0    # L2-регуляризация
+    dropout: float = 0.0         # 0 = выключен
+
+
+def get_device(preference: str = "auto") -> torch.device:
+    if preference == "cuda" or (preference == "auto" and torch.cuda.is_available()):
+        if torch.cuda.is_available():
+            return torch.device("cuda")
+    return torch.device("cpu")
 
 
 @dataclass
@@ -54,24 +64,24 @@ class EpochStats:
 
 class MlpRegressor(nn.Module):
     """
-    Многослойный перцептрон для регрессии.
-    Один выход (предсказывает число).
-
-    После train(normalize=True) на модели появляются атрибуты
-    x_mean/x_std/y_mean/y_std — нужны чтобы predict() мог корректно
-    нормализовать вход и денормализовать выход.
+    Многослойный перцептрон для регрессии. Один выход (предсказывает число).
+    После train(normalize=True) на модели появляются x_mean/x_std/y_mean/y_std.
     """
-    def __init__(self, input_dim: int, hidden_sizes: list[int], output_dim: int = 1):
+    def __init__(self, input_dim: int, hidden_sizes: list[int],
+                 output_dim: int = 1, dropout: float = 0.0):
         super().__init__()
+        self.input_dim = input_dim
+        self.hidden_sizes = hidden_sizes
         layers: list[nn.Module] = []
         prev = input_dim
         for h in hidden_sizes:
             layers.append(nn.Linear(prev, h))
             layers.append(nn.ReLU())
+            if dropout > 0:
+                layers.append(nn.Dropout(dropout))
             prev = h
         layers.append(nn.Linear(prev, output_dim))
         self.net = nn.Sequential(*layers)
-        # Нормализационные стат-параметры (заполняются в train, если normalize=True)
         self.x_mean: torch.Tensor | None = None
         self.x_std: torch.Tensor | None = None
         self.y_mean: float | None = None
@@ -79,6 +89,9 @@ class MlpRegressor(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.net(x)
+
+    def count_params(self) -> int:
+        return sum(p.numel() for p in self.parameters())
 
 
 # === Тренировка ===
@@ -121,15 +134,16 @@ def train(
         y = (y - y_mean) / y_std
 
     # 2) train/val split
+    device = get_device(cfg.device)
     n = len(X)
     n_val = int(n * val_split)
     idx = np.random.permutation(n)
     val_idx, train_idx = idx[:n_val], idx[n_val:]
 
-    X_train = torch.from_numpy(X[train_idx]).float()
-    y_train = torch.from_numpy(y[train_idx]).float().unsqueeze(1)
-    X_val   = torch.from_numpy(X[val_idx]).float()
-    y_val   = torch.from_numpy(y[val_idx]).float().unsqueeze(1)
+    X_train = torch.from_numpy(X[train_idx]).float().to(device)
+    y_train = torch.from_numpy(y[train_idx]).float().unsqueeze(1).to(device)
+    X_val   = torch.from_numpy(X[val_idx]).float().to(device)
+    y_val   = torch.from_numpy(y[val_idx]).float().unsqueeze(1).to(device)
 
     loader = DataLoader(
         TensorDataset(X_train, y_train),
@@ -139,7 +153,11 @@ def train(
 
     # 3) Модель — или новая, или продолжение
     if existing_model is None:
-        model = MlpRegressor(input_dim=X.shape[1], hidden_sizes=cfg.hidden_sizes)
+        model = MlpRegressor(
+            input_dim=X.shape[1],
+            hidden_sizes=cfg.hidden_sizes,
+            dropout=cfg.dropout,
+        )
         if cfg.normalize:
             model.x_mean = torch.from_numpy(np.asarray(x_mean)).float()
             model.x_std = torch.from_numpy(np.asarray(x_std)).float()
@@ -147,11 +165,24 @@ def train(
             model.y_std = y_std
     else:
         model = existing_model
+    model = model.to(device)
 
-    if cfg.optimizer == "adam":
-        opt = torch.optim.Adam(model.parameters(), lr=cfg.learning_rate)
+    # Нормстатистики тоже на device чтобы predict не дёргать туда-сюда
+    if model.x_mean is not None:
+        model.x_mean = model.x_mean.to(device)
+        model.x_std = model.x_std.to(device)
+
+    opt_name = cfg.optimizer.lower()
+    if opt_name == "adam":
+        opt = torch.optim.Adam(model.parameters(), lr=cfg.learning_rate, weight_decay=cfg.weight_decay)
+    elif opt_name == "adamw":
+        opt = torch.optim.AdamW(model.parameters(), lr=cfg.learning_rate, weight_decay=cfg.weight_decay)
+    elif opt_name == "sgd":
+        opt = torch.optim.SGD(model.parameters(), lr=cfg.learning_rate, weight_decay=cfg.weight_decay, momentum=0.9)
+    elif opt_name == "rmsprop":
+        opt = torch.optim.RMSprop(model.parameters(), lr=cfg.learning_rate, weight_decay=cfg.weight_decay)
     else:
-        opt = torch.optim.SGD(model.parameters(), lr=cfg.learning_rate)
+        raise ValueError(f"Неизвестный оптимизатор: {cfg.optimizer}")
 
     scheduler = None
     if cfg.lr_schedule:
@@ -209,17 +240,16 @@ def train(
 def predict(model: MlpRegressor, X: np.ndarray) -> np.ndarray:
     """
     Применить обученную модель к новым данным.
-
-    Если на модели есть нормализационные статистики — автоматически
-    нормализует вход и денормализует выход.
+    Автоматически уважает device модели (CPU/GPU) и денормализует выход.
     """
     model.eval()
+    device = next(model.parameters()).device
     with torch.no_grad():
-        xt = torch.from_numpy(X).float()
+        xt = torch.from_numpy(X).float().to(device)
         if model.x_mean is not None:
             xt = (xt - model.x_mean) / model.x_std
         out = model(xt)
-        out = out.squeeze(-1).numpy()
+        out = out.squeeze(-1).cpu().numpy()
         if model.y_mean is not None:
             out = out * model.y_std + model.y_mean
         return out

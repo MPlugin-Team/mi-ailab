@@ -4,7 +4,8 @@ scikit-learn>=1.4.0
 numpy>=1.24.0
 matplotlib>=3.7.0
 joblib>=1.3.0
+psutil>=5.9.0           # для детекта CPU/RAM в «Моя машина»
 
-# Своя нейронка через PyTorch (CPU-версия, на старте без GPU чтоб не разводить грязь)
+# Своя нейронка через PyTorch.
+# Для GPU-версии (CUDA): pip install torch --index-url https://download.pytorch.org/whl/cu121
 torch>=2.2.0
-
