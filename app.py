@@ -26,6 +26,7 @@ from src import text_datasets as tds
 from src import text_model as tm
 from src import hardware as hw
 from src import theme as theme_mod
+from src import model_storage as ms
 
 
 # === Общее состояние приложения ===
@@ -169,6 +170,8 @@ class App:
     def _steps_for_mode(self) -> list[tuple[str, str]]:
         if self.state.mode == "hardware":
             return [("Инфо + бенчмарк", "_show_hardware_step")]
+        if self.state.mode == "models":
+            return [("Галерея", "_show_models_step")]
         if self.state.mode == "text":
             return [
                 ("Корпус", "_show_corpus_step"),
@@ -188,6 +191,7 @@ class App:
             self._mode_tab("hardware",   "Моя машина", "железо", ft.icons.MEMORY),
             self._mode_tab("regression", "Регрессия",  "MLP",   ft.icons.SHOW_CHART),
             self._mode_tab("text",       "Текст",      "LSTM",  ft.icons.TEXT_FIELDS),
+            self._mode_tab("models",     "Мои модели", "saved", ft.icons.SAVE),
         ]
         # Step buttons
         self.steps_container.controls = [
@@ -659,6 +663,11 @@ class App:
             on_click=self._on_nn_continue_click,
             visible=self.state.nn_model is not None,
         )
+        self.save_button = ft.OutlinedButton(
+            text="💾 Сохранить",
+            on_click=self._on_nn_save_click,
+            visible=self.state.nn_model is not None,
+        )
         self.train_progress = ft.ProgressBar(visible=False, width=400, color=self.c("acc"))
         self.train_status = ft.Text("Готово к старту", size=12, color=self.c("fg3"))
 
@@ -680,7 +689,7 @@ class App:
             ft.Container(height=14),
             advanced_section,
             ft.Container(height=14),
-            ft.Row([train_button, self.continue_button], spacing=12),
+            ft.Row([train_button, self.continue_button, self.save_button], spacing=12),
             self.train_progress,
             self.train_status,
             ft.Container(height=8),
@@ -792,6 +801,25 @@ class App:
             return
         self._run_training(existing_model=self.state.nn_model)
 
+    def _on_nn_save_click(self, e):
+        if self.state.nn_model is None:
+            self._snackbar("Нет обученной модели")
+            return
+        try:
+            title = (f"{self.state.dataset.info.title} · "
+                     f"{self.state.hidden_layers}") if self.state.dataset else "Untitled"
+            path = ms.save_mlp(
+                model=self.state.nn_model,
+                title=title,
+                dataset_name=self.state.dataset.info.title if self.state.dataset else "",
+                feature_columns=list(self.state.feature_columns),
+                target_column=self.state.target_column or "",
+                history=self.state.nn_history,
+            )
+            self._snackbar(f"💾 Сохранено: {path.name}")
+        except Exception as ex:
+            self._snackbar(f"Ошибка сохранения: {ex}")
+
     def _run_training(self, existing_model: nn.MlpRegressor | None):
         """Общий запуск тренировки. existing_model=None — с нуля, иначе продолжаем."""
         is_continue = existing_model is not None
@@ -892,6 +920,7 @@ class App:
                 # После первой тренировки показываем кнопку «Дообучить»
                 self.continue_button.visible = True
                 self.continue_button.text = f"Дообучить ещё {self.state.epochs} эпох"
+                self.save_button.visible = True
             except Exception as ex:
                 self.train_status.value = f"Ошибка обучения: {ex}"
             finally:
@@ -1305,6 +1334,146 @@ class App:
 
         threading.Thread(target=worker, daemon=True).start()
 
+    # ================== МОИ МОДЕЛИ ==================
+
+    def _show_models_step(self):
+        t = self.t
+        models = ms.list_models()
+
+        if not models:
+            empty = ft.Container(
+                padding=24, border_radius=8,
+                border=ft.border.all(1, t.line1), bgcolor=t.bg2,
+                content=ft.Column([
+                    ft.Icon(ft.icons.INBOX, size=40, color=t.fg3),
+                    ft.Text("Пока ни одной модели не сохранено",
+                            size=14, color=t.fg2),
+                    ft.Text("После тренировки нажми «💾 Сохранить» — модель появится тут",
+                            size=11, color=t.fg3),
+                ], spacing=10, horizontal_alignment=ft.CrossAxisAlignment.CENTER),
+                alignment=ft.alignment.center,
+            )
+            self.content_panel.content = ft.Column([
+                ft.Text("Мои модели", size=24, weight=ft.FontWeight.W_500, color=t.fg1),
+                ft.Text("Сохранённые .pt чекпойнты — можно загрузить и продолжить",
+                        size=13, color=t.fg2),
+                ft.Container(height=20),
+                empty,
+            ], scroll=ft.ScrollMode.AUTO)
+            return
+
+        cards = []
+        for meta in models:
+            cards.append(self._model_card(meta))
+
+        self.content_panel.content = ft.Column([
+            ft.Row([
+                ft.Column([
+                    ft.Text("Мои модели", size=24, weight=ft.FontWeight.W_500, color=t.fg1),
+                    ft.Text(f"{len(models)} модель(ей) в models/",
+                            size=12, color=t.fg3,
+                            font_family="Consolas, monospace"),
+                ], spacing=4, expand=True),
+                ft.IconButton(
+                    icon=ft.icons.REFRESH, icon_color=t.fg2, tooltip="Обновить",
+                    on_click=lambda e: (self._show_models_step(), self.page.update()),
+                ),
+            ]),
+            ft.Container(height=14),
+            ft.Column(cards, spacing=10),
+        ], scroll=ft.ScrollMode.AUTO)
+
+    def _model_card(self, meta: ms.ModelMeta) -> ft.Container:
+        t = self.t
+        kind_color = {"mlp": t.success, "lstm": t.acc, "cnn": t.warning}.get(meta.kind, t.fg3)
+        kind_label = meta.kind.upper()
+        loss_str = f"{meta.final_loss:.5f}" if meta.final_loss is not None else "—"
+        params_str = (f"{meta.params:,}".replace(",", " ")
+                      if meta.params is not None else "—")
+
+        return ft.Container(
+            padding=16, border_radius=8,
+            border=ft.border.all(1, t.line1), bgcolor=t.bg2,
+            content=ft.Row([
+                ft.Container(
+                    width=44, height=44, border_radius=8,
+                    bgcolor=t.bg1, border=ft.border.all(1, kind_color),
+                    content=ft.Text(kind_label, size=11, weight=ft.FontWeight.W_700,
+                                    color=kind_color,
+                                    font_family="Consolas, monospace"),
+                    alignment=ft.alignment.center,
+                ),
+                ft.Column([
+                    ft.Text(meta.title, size=14, weight=ft.FontWeight.W_600, color=t.fg1),
+                    ft.Text(
+                        f"{meta.dataset or '—'} · loss {loss_str} · {meta.epochs_trained or 0} эпох · "
+                        f"{params_str} параметров",
+                        size=11, color=t.fg3, font_family="Consolas, monospace",
+                    ),
+                    ft.Text(f"{meta.saved_str} · {meta.size_kb:.1f} KB",
+                            size=10, color=t.fg4, font_family="Consolas, monospace"),
+                ], spacing=3, expand=True),
+                ft.FilledButton(
+                    text="Загрузить", icon=ft.icons.DOWNLOAD,
+                    on_click=lambda e, m=meta: self._on_model_load(m),
+                    style=ft.ButtonStyle(bgcolor=t.acc, color=t.bg0),
+                ),
+                ft.IconButton(
+                    icon=ft.icons.DELETE_OUTLINE, icon_color=t.danger,
+                    tooltip="Удалить",
+                    on_click=lambda e, m=meta: self._on_model_delete(m),
+                ),
+            ], spacing=14, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+        )
+
+    def _on_model_load(self, meta: ms.ModelMeta):
+        try:
+            if meta.kind == "mlp":
+                model, m = ms.load_mlp(meta.path)
+                self.state.nn_model = model
+                self.state.nn_history = []
+                self.state.feature_columns = m.get("feature_columns", [])
+                self.state.target_column = m.get("target_column")
+                # Загрузим оригинальный датасет если найдём — иначе тест-экран
+                # будет работать на feature_columns без таблицы примеров.
+                ds_key = m.get("dataset")
+                if ds_key:
+                    try:
+                        # Угадываем встроенный по title
+                        for info in ds.list_builtin():
+                            if info.title == ds_key:
+                                self.state.dataset = ds.load_builtin(info.key)
+                                break
+                    except Exception:
+                        pass
+                self.state.mode = "regression"
+                self.current_step = 2  # → Тест
+                self._snackbar(f"Загружена MLP «{meta.title}» — иди в Тест")
+            elif meta.kind == "lstm":
+                model, m = ms.load_lstm(meta.path)
+                self.state.text_model = model
+                self.state.text_history = []
+                self.state.mode = "text"
+                self.current_step = 2  # → Генерация
+                self._snackbar(f"Загружена LSTM «{meta.title}» — иди в Генерацию")
+            else:
+                self._snackbar(f"Неизвестный тип: {meta.kind}")
+                return
+            self._rebuild_sidebar()
+            self._show_current_step()
+            self.page.update()
+        except Exception as ex:
+            self._snackbar(f"Ошибка загрузки: {ex}")
+
+    def _on_model_delete(self, meta: ms.ModelMeta):
+        try:
+            ms.delete_model(meta.path)
+            self._snackbar(f"Удалена «{meta.title}»")
+            self._show_models_step()
+            self.page.update()
+        except Exception as ex:
+            self._snackbar(f"Ошибка: {ex}")
+
     # ================== ТЕКСТОВЫЙ РЕЖИМ ==================
 
     # === Шаг 1: Выбор корпуса ===
@@ -1470,6 +1639,11 @@ class App:
             on_click=self._on_text_continue_click,
             visible=self.state.text_model is not None,
         )
+        self.text_save_button = ft.OutlinedButton(
+            text="💾 Сохранить",
+            on_click=self._on_text_save_click,
+            visible=self.state.text_model is not None,
+        )
         self.text_train_progress = ft.ProgressBar(visible=False, width=400, color=self.c("acc"))
         self.text_train_status = ft.Text("Готово к старту", size=12, color=self.c("fg3"))
         self.text_sample_box = ft.Container(
@@ -1496,7 +1670,7 @@ class App:
             ft.Container(height=10),
             text_advanced,
             ft.Container(height=14),
-            ft.Row([train_button, self.text_continue_button], spacing=12),
+            ft.Row([train_button, self.text_continue_button, self.text_save_button], spacing=12),
             self.text_train_progress,
             self.text_train_status,
             ft.Container(height=8),
@@ -1611,6 +1785,25 @@ class App:
             return
         self._run_text_training(existing_model=self.state.text_model)
 
+    def _on_text_save_click(self, e):
+        if self.state.text_model is None:
+            self._snackbar("Нет обученной модели")
+            return
+        try:
+            corpus = self.state.text_corpus
+            title = (f"{corpus.title} · "
+                     f"{self.state.text_hidden_size}h × "
+                     f"{self.state.text_num_layers}L") if corpus else "Untitled LSTM"
+            path = ms.save_lstm(
+                model=self.state.text_model,
+                title=title,
+                corpus_name=corpus.title if corpus else "",
+                history=self.state.text_history,
+            )
+            self._snackbar(f"💾 Сохранено: {path.name}")
+        except Exception as ex:
+            self._snackbar(f"Ошибка сохранения: {ex}")
+
     def _run_text_training(self, existing_model: tm.CharLSTM | None):
         is_continue = existing_model is not None
         if not is_continue:
@@ -1687,6 +1880,7 @@ class App:
                 )
                 self.text_continue_button.visible = True
                 self.text_continue_button.text = f"Дообучить ещё {self.state.text_epochs} эпох"
+                self.text_save_button.visible = True
             except Exception as ex:
                 self.text_train_status.value = f"Ошибка: {ex}"
             finally:
