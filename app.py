@@ -22,6 +22,8 @@ import pandas as pd
 import flet as ft
 from src import datasets as ds
 from src import neural_net as nn
+from src import text_datasets as tds
+from src import text_model as tm
 
 
 # === Общее состояние приложения ===
@@ -29,20 +31,34 @@ from src import neural_net as nn
 @dataclass
 class AppState:
     """Шарится между экранами через App.state."""
+    # Активный режим: "regression" (табличные данные, MLP) или "text" (char-LSTM)
+    mode: str = "regression"
+
+    # === Регрессия (старый Mi-AiLab) ===
     dataset: ds.LoadedDataset | None = None
     target_column: str | None = None
-    task_type: str | None = None             # "regression" в основном для своей NN
-    # Архитектура и гиперпараметры
+    task_type: str | None = None
     hidden_layers: list[int] = field(default_factory=lambda: [16, 16])
     epochs: int = 100
     learning_rate: float = 0.01
     batch_size: int = 32
-    normalize: bool = True            # стандартизация — почти всегда улучшает точность
-    lr_schedule: bool = True          # CosineAnnealing — финальная подстройка
-    # Результаты после обучения
+    normalize: bool = True
+    lr_schedule: bool = True
     nn_model: nn.MlpRegressor | None = None
     nn_history: list[nn.EpochStats] = field(default_factory=list)
     feature_columns: list[str] = field(default_factory=list)
+
+    # === Text generation (char-LSTM) ===
+    text_corpus: tds.TextCorpus | None = None
+    text_hidden_size: int = 256
+    text_num_layers: int = 2
+    text_embed_size: int = 64
+    text_seq_len: int = 100
+    text_epochs: int = 20
+    text_batch_size: int = 64
+    text_lr: float = 0.003
+    text_model: tm.CharLSTM | None = None
+    text_history: list[tm.TextEpochStats] = field(default_factory=list)
 
 
 # === Главное окно ===
@@ -61,34 +77,85 @@ class App:
         page.bgcolor = "#1E1F22"          # Discord-ish dark
         page.padding = 0
 
-        self.current_step = 0  # 0=dataset, 1=train, 2=test
+        self.current_step = 0
 
-        # Контейнер для контента — будем менять при переходе по шагам
         self.content_panel = ft.Container(expand=True, padding=24)
 
-        # Сайдбар: кнопки шагов
-        self.step_buttons = [
-            self._step_button(0, "1", "Датасет"),
-            self._step_button(1, "2", "Обучение"),
-            self._step_button(2, "3", "Тест"),
-        ]
+        # Mode tabs (Регрессия / Текст) — сверху сайдбара
+        self.mode_tabs_container = ft.Column(spacing=4)
+        self.steps_container = ft.Column(spacing=4)
+        self._rebuild_sidebar()
+
         sidebar = ft.Container(
-            width=200,
+            width=210,
             bgcolor="#232428",
             padding=16,
             content=ft.Column([
                 ft.Container(height=8),
                 ft.Text("Mi-AiLab", size=18, weight=ft.FontWeight.W_600, color="#F2F3F5"),
                 ft.Text("by Mi-PluginTeam", size=11, color="#5A5C63"),
-                ft.Container(height=24),
-                *self.step_buttons,
+                ft.Container(height=16),
+                ft.Text("РЕЖИМ", size=10, color="#5A5C63", weight=ft.FontWeight.W_600),
+                self.mode_tabs_container,
+                ft.Container(height=14),
+                ft.Text("ШАГИ", size=10, color="#5A5C63", weight=ft.FontWeight.W_600),
+                self.steps_container,
             ], spacing=4),
         )
 
         page.add(ft.Row([sidebar, self.content_panel], expand=True, spacing=0))
-        self._show_dataset_step()
+        self._show_current_step()
 
     # === Сайдбар ===
+
+    # Шаги в каждом режиме: (label, метод-рендерер)
+    @property
+    def _steps_for_mode(self) -> list[tuple[str, str]]:
+        if self.state.mode == "text":
+            return [
+                ("Корпус", "_show_corpus_step"),
+                ("Обучение", "_show_text_train_step"),
+                ("Генерация", "_show_generate_step"),
+            ]
+        return [
+            ("Датасет", "_show_dataset_step"),
+            ("Обучение", "_show_train_step"),
+            ("Тест", "_show_test_step"),
+        ]
+
+    def _rebuild_sidebar(self):
+        # Mode tabs
+        self.mode_tabs_container.controls = [
+            self._mode_tab("regression", "📊 Регрессия"),
+            self._mode_tab("text", "📝 Текст (LSTM)"),
+        ]
+        # Step buttons
+        self.steps_container.controls = [
+            self._step_button(i, str(i + 1), label)
+            for i, (label, _) in enumerate(self._steps_for_mode)
+        ]
+
+    def _mode_tab(self, mode_key: str, label: str) -> ft.Container:
+        active = self.state.mode == mode_key
+        return ft.Container(
+            padding=ft.padding.symmetric(horizontal=12, vertical=8),
+            border_radius=8,
+            bgcolor="#2B00E5FF" if active else None,
+            content=ft.Text(label, size=12,
+                            color="#00E5FF" if active else "#8B8D93",
+                            weight=ft.FontWeight.W_500),
+            on_click=lambda e, k=mode_key: self._switch_mode(k),
+            ink=True,
+        )
+
+    def _switch_mode(self, mode_key: str):
+        if self.state.mode == mode_key:
+            return
+        self.state.mode = mode_key
+        self.current_step = 0
+        self._rebuild_sidebar()
+        self._show_current_step()
+        self.page.update()
 
     def _step_button(self, idx: int, num: str, label: str) -> ft.Container:
         active = idx == self.current_step
@@ -114,28 +181,33 @@ class App:
         )
 
     def _goto_step(self, idx: int):
-        # Запретим прыгать вперёд если предыдущий шаг не пройден
-        if idx == 1 and (self.state.dataset is None or self.state.target_column is None):
-            self._snackbar("Сначала выбери датасет и target-колонку")
-            return
-        if idx == 2 and self.state.nn_model is None:
-            self._snackbar("Сначала обучи нейросеть в шаге 'Обучение'")
-            return
+        # Гарды на пропуск шагов
+        if self.state.mode == "regression":
+            if idx == 1 and (self.state.dataset is None or self.state.target_column is None):
+                self._snackbar("Сначала выбери датасет и target-колонку")
+                return
+            if idx == 2 and self.state.nn_model is None:
+                self._snackbar("Сначала обучи нейросеть в шаге 'Обучение'")
+                return
+        else:  # text
+            if idx == 1 and self.state.text_corpus is None:
+                self._snackbar("Сначала выбери текстовый корпус")
+                return
+            if idx == 2 and self.state.text_model is None:
+                self._snackbar("Сначала обучи LSTM в шаге 'Обучение'")
+                return
 
         self.current_step = idx
-        # Пересоздаём кнопки сайдбара чтобы обновить active-стиль
-        for i, btn in enumerate(self.step_buttons):
-            btn.bgcolor = "#2B00E5FF" if i == self.current_step else None
-            num_circle = btn.content.controls[0]
-            label_text = btn.content.controls[1]
-            num_circle.bgcolor = "#00E5FF" if i == self.current_step else "#2B2D31"
-            num_circle.content.color = "#051518" if i == self.current_step else "#8B8D93"
-            label_text.color = "#F2F3F5" if i == self.current_step else "#8B8D93"
-
-        if idx == 0: self._show_dataset_step()
-        if idx == 1: self._show_train_step()
-        if idx == 2: self._show_test_step()
+        self._rebuild_sidebar()
+        self._show_current_step()
         self.page.update()
+
+    def _show_current_step(self):
+        """Вызывает нужный рендерер по текущему режиму и шагу."""
+        steps = self._steps_for_mode
+        if 0 <= self.current_step < len(steps):
+            _, method_name = steps[self.current_step]
+            getattr(self, method_name)()
 
     def _snackbar(self, msg: str):
         # Flet 0.24: SnackBar показывается через page.snack_bar + open=True
@@ -732,6 +804,404 @@ class App:
                     accuracy_text,
                 ], spacing=4),
             ),
+        ], scroll=ft.ScrollMode.AUTO)
+
+    # ================== ТЕКСТОВЫЙ РЕЖИМ ==================
+
+    # === Шаг 1: Выбор корпуса ===
+
+    def _show_corpus_step(self):
+        corpora = tds.list_corpora()
+        items = [self._corpus_card(c) for c in corpora]
+
+        if not items:
+            items = [ft.Text(
+                "Нет файлов в data/texts/. Положи туда любой .txt — он появится тут.",
+                size=12, color="#8B8D93")]
+
+        self.content_panel.content = ft.Column([
+            ft.Text("Выбери текстовый корпус", size=24, weight=ft.FontWeight.W_500,
+                    color="#F2F3F5"),
+            ft.Text("Char-LSTM будет учиться предсказывать следующий символ. "
+                    "Чем больше и осмысленнее текст — тем лучше результат.",
+                    size=13, color="#8B8D93"),
+            ft.Container(height=8),
+            ft.Container(
+                padding=12, border_radius=8,
+                border=ft.border.all(1, "#2B2D31"), bgcolor="#1A1B1E",
+                content=ft.Text(
+                    "💡 Где взять больший корпус: gutenberg.org → скачай любую книгу как "
+                    "Plain Text UTF-8 → положи в data/texts/. Хорошие варианты для "
+                    "начала: Alice in Wonderland (~150 KB), Sherlock Holmes (~600 KB).",
+                    size=11, color="#8B8D93"),
+            ),
+            ft.Container(height=16),
+            ft.Column(items, spacing=10),
+        ], scroll=ft.ScrollMode.AUTO)
+
+    def _corpus_card(self, corpus: tds.TextCorpus) -> ft.Container:
+        selected = (self.state.text_corpus is not None
+                    and self.state.text_corpus.key == corpus.key)
+        # Превью первых ~150 символов
+        preview = corpus.text[:150].replace("\n", " ")
+        if len(corpus.text) > 150:
+            preview += "..."
+
+        return ft.Container(
+            padding=16,
+            border_radius=12,
+            border=ft.border.all(1, "#00E5FF" if selected else "#2B2D31"),
+            bgcolor="#2B00E5FF" if selected else "#232428",
+            content=ft.Column([
+                ft.Row([
+                    ft.Text(corpus.title, size=15, weight=ft.FontWeight.W_600,
+                            color="#F2F3F5"),
+                    ft.Container(
+                        padding=ft.padding.symmetric(horizontal=8, vertical=2),
+                        border_radius=10, bgcolor="#2B2D31",
+                        content=ft.Text(corpus.description, size=10, color="#8B8D93"),
+                    ),
+                ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
+                ft.Text(preview, size=11, color="#8B8D93", italic=True),
+            ], spacing=8),
+            on_click=lambda e, c=corpus: self._on_corpus_selected(c),
+            ink=True,
+        )
+
+    def _on_corpus_selected(self, corpus: tds.TextCorpus):
+        self.state.text_corpus = corpus
+        # Сбрасываем модель — будет другой вокабуляр
+        self.state.text_model = None
+        self.state.text_history = []
+        self._snackbar(f"Корпус «{corpus.title}»: {corpus.description}")
+        self._show_corpus_step()
+        self.page.update()
+
+    # === Шаг 2: Обучение LSTM ===
+
+    def _show_text_train_step(self):
+        if self.state.text_corpus is None:
+            self.content_panel.content = ft.Text("Сначала выбери корпус", color="#8B8D93")
+            return
+
+        corpus = self.state.text_corpus
+
+        # Гиперпараметры
+        hidden_label = ft.Text(f"Hidden size (нейронов LSTM): {self.state.text_hidden_size}",
+                               size=12, color="#F2F3F5")
+        hidden_slider = ft.Slider(
+            min=32, max=512, divisions=15, value=self.state.text_hidden_size,
+            active_color="#00E5FF", inactive_color="#2B2D31", width=400,
+            on_change=lambda e: self._on_text_hidden_changed(int(e.control.value), hidden_label),
+        )
+        layers_label = ft.Text(f"LSTM-слоёв: {self.state.text_num_layers}",
+                               size=12, color="#F2F3F5")
+        layers_slider = ft.Slider(
+            min=1, max=4, divisions=3, value=self.state.text_num_layers,
+            active_color="#00E5FF", inactive_color="#2B2D31", width=400,
+            on_change=lambda e: self._on_text_layers_changed(int(e.control.value), layers_label),
+        )
+        epochs_label = ft.Text(f"Эпох: {self.state.text_epochs}",
+                               size=12, color="#F2F3F5")
+        epochs_slider = ft.Slider(
+            min=1, max=100, divisions=99, value=self.state.text_epochs,
+            active_color="#00E5FF", inactive_color="#2B2D31", width=400,
+            on_change=lambda e: self._on_text_epochs_changed(int(e.control.value), epochs_label),
+        )
+        seq_dropdown = ft.Dropdown(
+            label="seq_len (контекст)", value=str(self.state.text_seq_len),
+            options=[ft.dropdown.Option(v) for v in ["50", "100", "200", "300"]],
+            on_change=lambda e: self._on_text_seq_changed(int(e.control.value)),
+            width=180,
+        )
+        lr_dropdown = ft.Dropdown(
+            label="learning rate", value=str(self.state.text_lr),
+            options=[ft.dropdown.Option(v) for v in ["0.001", "0.003", "0.005", "0.01"]],
+            on_change=lambda e: self._on_text_lr_changed(float(e.control.value)),
+            width=180,
+        )
+
+        # Live loss chart
+        self.text_loss_chart = ft.LineChart(
+            data_series=[ft.LineChartData(data_points=[], color="#00E5FF",
+                                          stroke_width=2, curved=False)],
+            border=ft.border.all(1, "#2B2D31"),
+            horizontal_grid_lines=ft.ChartGridLines(interval=0.2, width=1, color="#2B2D31"),
+            vertical_grid_lines=ft.ChartGridLines(width=1, color="#2B2D31"),
+            left_axis=ft.ChartAxis(
+                labels_size=60, labels_interval=0.2,
+                title=ft.Text("loss (норм.)", color="#8B8D93", size=10),
+                title_size=20,
+            ),
+            bottom_axis=ft.ChartAxis(
+                labels_size=20,
+                title=ft.Text("эпоха", color="#8B8D93", size=10), title_size=14,
+            ),
+            min_x=0, max_x=self.state.text_epochs,
+            min_y=0, max_y=1,
+            expand=True, height=220, tooltip_bgcolor="#0E0E11",
+        )
+
+        train_button = ft.FilledButton(
+            text="Старт обучения", icon=ft.icons.PLAY_ARROW,
+            on_click=self._on_text_train_click,
+            style=ft.ButtonStyle(bgcolor="#00E5FF", color="#051518"),
+        )
+        self.text_continue_button = ft.OutlinedButton(
+            text=f"Дообучить ещё {self.state.text_epochs} эпох",
+            icon=ft.icons.PLUS_ONE,
+            on_click=self._on_text_continue_click,
+            visible=self.state.text_model is not None,
+        )
+        self.text_train_progress = ft.ProgressBar(visible=False, width=400, color="#00E5FF")
+        self.text_train_status = ft.Text("Готово к старту", size=12, color="#8B8D93")
+        self.text_sample_box = ft.Container(
+            padding=12, border_radius=8,
+            border=ft.border.all(1, "#2B2D31"), bgcolor="#1A1B1E",
+            content=ft.Text("(после первой эпохи здесь появится живой образец генерации)",
+                            size=11, color="#5A5C63", italic=True),
+        )
+
+        self.content_panel.content = ft.Column([
+            ft.Text("Обучение char-LSTM", size=24, weight=ft.FontWeight.W_500,
+                    color="#F2F3F5"),
+            ft.Text(f"Корпус: {corpus.title} · {corpus.description}",
+                    size=12, color="#8B8D93"),
+            ft.Container(height=14),
+            ft.Text("Архитектура", size=13, weight=ft.FontWeight.W_500, color="#F2F3F5"),
+            hidden_label, hidden_slider,
+            layers_label, layers_slider,
+            ft.Container(height=10),
+            ft.Text("Гиперпараметры", size=13, weight=ft.FontWeight.W_500, color="#F2F3F5"),
+            epochs_label, epochs_slider,
+            ft.Row([seq_dropdown, lr_dropdown], spacing=12),
+            ft.Container(height=14),
+            ft.Row([train_button, self.text_continue_button], spacing=12),
+            self.text_train_progress,
+            self.text_train_status,
+            ft.Container(height=8),
+            ft.Text("Loss по эпохам", size=11, color="#8B8D93"),
+            self.text_loss_chart,
+            ft.Container(height=10),
+            ft.Text("Живой образец генерации (обновляется после каждой эпохи):",
+                    size=11, color="#8B8D93"),
+            self.text_sample_box,
+        ], scroll=ft.ScrollMode.AUTO)
+
+    def _on_text_hidden_changed(self, v: int, label: ft.Text):
+        self.state.text_hidden_size = v
+        label.value = f"Hidden size (нейронов LSTM): {v}"
+        self.page.update()
+
+    def _on_text_layers_changed(self, v: int, label: ft.Text):
+        self.state.text_num_layers = v
+        label.value = f"LSTM-слоёв: {v}"
+        self.page.update()
+
+    def _on_text_epochs_changed(self, v: int, label: ft.Text):
+        self.state.text_epochs = v
+        label.value = f"Эпох: {v}"
+        self.text_loss_chart.max_x = v
+        self.page.update()
+
+    def _on_text_seq_changed(self, v: int):
+        self.state.text_seq_len = v
+
+    def _on_text_lr_changed(self, v: float):
+        self.state.text_lr = v
+
+    def _on_text_train_click(self, e):
+        self._run_text_training(existing_model=None)
+
+    def _on_text_continue_click(self, e):
+        if self.state.text_model is None:
+            self._snackbar("Сначала обучи модель кнопкой «Старт обучения»")
+            return
+        self._run_text_training(existing_model=self.state.text_model)
+
+    def _run_text_training(self, existing_model: tm.CharLSTM | None):
+        is_continue = existing_model is not None
+        if not is_continue:
+            self.text_loss_chart.data_series[0].data_points = []
+            self.state.text_history = []
+            self.text_loss_chart.max_x = self.state.text_epochs
+        else:
+            total = (self.state.text_history[-1].epoch if self.state.text_history else 0) + self.state.text_epochs
+            self.text_loss_chart.max_x = total
+
+        self.text_train_progress.visible = True
+        self.text_train_status.value = "Подготовка..."
+        self.page.update()
+
+        cfg = tm.TextTrainConfig(
+            hidden_size=self.state.text_hidden_size,
+            num_layers=self.state.text_num_layers,
+            embed_size=self.state.text_embed_size,
+            seq_len=self.state.text_seq_len,
+            batch_size=self.state.text_batch_size,
+            epochs=self.state.text_epochs,
+            learning_rate=self.state.text_lr,
+        )
+        text = self.state.text_corpus.text
+        epoch_offset = self.state.text_history[-1].epoch if (is_continue and self.state.text_history) else 0
+
+        # Нормализация loss-шкалы (как в регрессии)
+        if is_continue and self.state.text_history:
+            initial_scale = max(s.train_loss for s in self.state.text_history) * 1.1
+            max_loss_ref = {"val": initial_scale if initial_scale > 1e-6 else 4.0}
+        else:
+            max_loss_ref = {"val": None}
+
+        def on_epoch(stats: tm.TextEpochStats):
+            if max_loss_ref["val"] is None:
+                max_loss_ref["val"] = stats.train_loss * 1.1
+                if max_loss_ref["val"] < 1e-6:
+                    max_loss_ref["val"] = 4.0
+            scale = max_loss_ref["val"]
+            self.text_loss_chart.data_series[0].data_points.append(
+                ft.LineChartDataPoint(stats.epoch, min(stats.train_loss / scale, 1.0))
+            )
+            phase = "Дообучение" if is_continue else "Обучение"
+            self.text_train_status.value = (
+                f"{phase} · эпоха {stats.epoch} · loss: {stats.train_loss:.4f} · "
+                f"{stats.elapsed_sec:.1f}с"
+            )
+            self.text_sample_box.content = ft.Text(
+                stats.sample, size=12, color="#F2F3F5",
+                font_family="Consolas, monospace",
+            )
+            try:
+                self.page.update()
+            except Exception:
+                pass
+
+        def worker():
+            try:
+                model, history = tm.train_text(
+                    text, cfg, on_epoch=on_epoch,
+                    existing_model=existing_model, epoch_offset=epoch_offset,
+                )
+                self.state.text_model = model
+                self.state.text_history.extend(history)
+                final = history[-1]
+                self.text_train_status.value = (
+                    f"Готово! Финальный loss: {final.train_loss:.4f} · "
+                    f"всего эпох: {final.epoch} · {final.elapsed_sec:.1f}с · "
+                    f"параметров: {model.count_params():,}".replace(",", " ")
+                )
+                self.text_continue_button.visible = True
+                self.text_continue_button.text = f"Дообучить ещё {self.state.text_epochs} эпох"
+            except Exception as ex:
+                self.text_train_status.value = f"Ошибка: {ex}"
+            finally:
+                self.text_train_progress.visible = False
+                try:
+                    self.page.update()
+                except Exception:
+                    pass
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    # === Шаг 3: Генерация текста ===
+
+    def _show_generate_step(self):
+        if self.state.text_model is None:
+            self.content_panel.content = ft.Text(
+                "Сначала обучи LSTM в шаге «Обучение»", color="#8B8D93")
+            return
+
+        model = self.state.text_model
+        prompt_field = ft.TextField(
+            label="Префикс (с чего начать)", value="The ",
+            multiline=True, min_lines=2, max_lines=4, width=600,
+            border_color="#2B2D31", focused_border_color="#00E5FF",
+        )
+        temperature_label = ft.Text("Temperature: 0.8", size=12, color="#F2F3F5")
+        temperature_slider = ft.Slider(
+            min=0.3, max=2.0, divisions=17, value=0.8,
+            active_color="#00E5FF", inactive_color="#2B2D31", width=400,
+        )
+
+        def on_temp_change(e):
+            temperature_label.value = f"Temperature: {e.control.value:.1f}"
+            self.page.update()
+        temperature_slider.on_change = on_temp_change
+
+        max_chars_label = ft.Text("Длина генерации: 300 символов", size=12, color="#F2F3F5")
+        max_chars_slider = ft.Slider(
+            min=50, max=2000, divisions=39, value=300,
+            active_color="#00E5FF", inactive_color="#2B2D31", width=400,
+        )
+
+        def on_len_change(e):
+            max_chars_label.value = f"Длина генерации: {int(e.control.value)} символов"
+            self.page.update()
+        max_chars_slider.on_change = on_len_change
+
+        output_text = ft.Text(
+            "(нажми «Сгенерировать»)",
+            size=13, color="#F2F3F5",
+            font_family="Consolas, monospace",
+            selectable=True,
+        )
+        output_box = ft.Container(
+            padding=14, border_radius=10,
+            border=ft.border.all(1, "#2B2D31"), bgcolor="#1A1B1E",
+            content=output_text,
+        )
+
+        gen_status = ft.Text("", size=11, color="#8B8D93")
+
+        def on_generate(e):
+            gen_status.value = "Генерация..."
+            output_text.value = ""
+            self.page.update()
+
+            def worker():
+                try:
+                    result = tm.generate_text(
+                        model,
+                        prompt=prompt_field.value or " ",
+                        max_chars=int(max_chars_slider.value),
+                        temperature=float(temperature_slider.value),
+                    )
+                    output_text.value = result
+                    gen_status.value = f"Готово · {len(result)} символов"
+                except Exception as ex:
+                    output_text.value = f"Ошибка: {ex}"
+                    gen_status.value = ""
+                try:
+                    self.page.update()
+                except Exception:
+                    pass
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        generate_button = ft.FilledButton(
+            text="Сгенерировать", icon=ft.icons.AUTO_AWESOME,
+            on_click=on_generate,
+            style=ft.ButtonStyle(bgcolor="#00E5FF", color="#051518"),
+        )
+
+        self.content_panel.content = ft.Column([
+            ft.Text("Генерация текста", size=24, weight=ft.FontWeight.W_500,
+                    color="#F2F3F5"),
+            ft.Text(
+                f"Модель: {model.count_params():,} параметров · "
+                f"вокабуляр: {model.tokenizer.vocab_size} символов".replace(",", " "),
+                size=12, color="#8B8D93"),
+            ft.Container(height=14),
+            prompt_field,
+            ft.Container(height=10),
+            temperature_label, temperature_slider,
+            ft.Text("0.3 = осторожно, повторно · 0.8 = норма · 2.0 = хаос",
+                    size=10, color="#5A5C63"),
+            ft.Container(height=8),
+            max_chars_label, max_chars_slider,
+            ft.Container(height=14),
+            ft.Row([generate_button, gen_status], spacing=14),
+            ft.Container(height=12),
+            output_box,
         ], scroll=ft.ScrollMode.AUTO)
 
 
