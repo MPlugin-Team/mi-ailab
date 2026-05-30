@@ -27,6 +27,8 @@ from src import text_model as tm
 from src import hardware as hw
 from src import theme as theme_mod
 from src import model_storage as ms
+from src import cnn_model as cm
+from src import image_datasets as imds
 
 
 # === Общее состояние приложения ===
@@ -78,6 +80,16 @@ class AppState:
     # === Hardware (мой комп) ===
     hardware_info: hw.HardwareInfo | None = None
     last_benchmark: hw.BenchmarkResult | None = None
+
+    # === CNN (картинки) ===
+    cnn_dataset: imds.LoadedImageDataset | None = None
+    cnn_hidden_size: int = 128
+    cnn_epochs: int = 5
+    cnn_batch_size: int = 64
+    cnn_lr: float = 0.001
+    cnn_model: cm.SimpleCNN | None = None
+    cnn_history: list[cm.CNNEpochStats] = field(default_factory=list)
+    cnn_max_samples: int = 6000           # для скорости — подмножество MNIST
 
 
 # === Главное окно ===
@@ -178,6 +190,12 @@ class App:
                 ("Обучение", "_show_text_train_step"),
                 ("Генерация", "_show_generate_step"),
             ]
+        if self.state.mode == "cnn":
+            return [
+                ("Датасет", "_show_cnn_dataset_step"),
+                ("Обучение", "_show_cnn_train_step"),
+                ("Тест", "_show_cnn_test_step"),
+            ]
         return [
             ("Датасет", "_show_dataset_step"),
             ("Обучение", "_show_train_step"),
@@ -191,6 +209,7 @@ class App:
             self._mode_tab("hardware",   "Моя машина", "железо", ft.icons.MEMORY),
             self._mode_tab("regression", "Регрессия",  "MLP",   ft.icons.SHOW_CHART),
             self._mode_tab("text",       "Текст",      "LSTM",  ft.icons.TEXT_FIELDS),
+            self._mode_tab("cnn",        "Картинки",   "CNN",   ft.icons.IMAGE),
             self._mode_tab("models",     "Мои модели", "saved", ft.icons.SAVE),
         ]
         # Step buttons
@@ -356,7 +375,14 @@ class App:
             if idx == 2 and self.state.text_model is None:
                 self._snackbar("Сначала обучи LSTM в шаге 'Обучение'")
                 return
-        # hardware mode — нет гардов, всего 1 шаг
+        elif self.state.mode == "cnn":
+            if idx == 1 and self.state.cnn_dataset is None:
+                self._snackbar("Сначала выбери картиночный датасет")
+                return
+            if idx == 2 and self.state.cnn_model is None:
+                self._snackbar("Сначала обучи CNN в шаге 'Обучение'")
+                return
+        # hardware/models — нет гардов
 
         self.current_step = idx
         self._rebuild_sidebar()
@@ -1473,6 +1499,357 @@ class App:
             self.page.update()
         except Exception as ex:
             self._snackbar(f"Ошибка: {ex}")
+
+    # ================== CNN РЕЖИМ ==================
+
+    def _show_cnn_dataset_step(self):
+        t = self.t
+        datasets = imds.list_image_datasets()
+        cards = []
+        for info in datasets:
+            sel = (self.state.cnn_dataset is not None
+                   and self.state.cnn_dataset.info.key == info.key)
+            cards.append(ft.Container(
+                padding=16, border_radius=10,
+                border=ft.border.all(1, t.acc if sel else t.line1),
+                bgcolor=t.acc_soft if sel else t.bg2,
+                content=ft.Column([
+                    ft.Row([
+                        ft.Text(info.title, size=15, weight=ft.FontWeight.W_600,
+                                color=t.fg1),
+                        ft.Container(
+                            padding=ft.padding.symmetric(horizontal=6, vertical=2),
+                            border_radius=3, bgcolor=t.bg3,
+                            content=ft.Text(f"{info.num_classes} классов",
+                                            size=9, color=t.fg3,
+                                            font_family="Consolas, monospace"),
+                        ),
+                    ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
+                    ft.Text(info.description, size=11, color=t.fg3),
+                    ft.Text(
+                        f"{info.image_size}×{info.image_size} · "
+                        f"{info.in_channels} канал(ов) · 70 000 примеров",
+                        size=10, color=t.fg4,
+                        font_family="Consolas, monospace"),
+                ], spacing=6),
+                on_click=lambda e, i=info: self._on_cnn_dataset_selected(i),
+                ink=True,
+            ))
+
+        samples_dropdown = ft.Dropdown(
+            label="Размер train-подвыборки (быстрее = меньше)",
+            value=str(self.state.cnn_max_samples),
+            options=[ft.dropdown.Option(v) for v in
+                     ["3000", "6000", "10000", "30000", "60000"]],
+            on_change=lambda e: setattr(self.state, "cnn_max_samples", int(e.control.value)),
+            width=420,
+        )
+
+        self.content_panel.content = ft.Column([
+            ft.Text("Выбери картиночный датасет", size=24,
+                    weight=ft.FontWeight.W_500, color=t.fg1),
+            ft.Text("Скачается через torchvision (~12-30 MB) при первом выборе.",
+                    size=12, color=t.fg3),
+            ft.Container(height=14),
+            samples_dropdown,
+            ft.Container(height=14),
+            ft.Column(cards, spacing=10),
+        ], scroll=ft.ScrollMode.AUTO)
+
+    def _on_cnn_dataset_selected(self, info: imds.ImageDatasetInfo):
+        def worker():
+            try:
+                self._snackbar(f"Загружаю {info.title}... (первый раз ~30 сек)")
+                loaded = imds.load_image_dataset(info.key,
+                                                 max_samples=self.state.cnn_max_samples)
+                self.state.cnn_dataset = loaded
+                self.state.cnn_model = None
+                self.state.cnn_history = []
+                self._snackbar(
+                    f"Готово: {len(loaded.X_train)} train / {len(loaded.X_test)} test")
+                self._show_cnn_dataset_step()
+                self.page.update()
+            except Exception as ex:
+                self._snackbar(f"Ошибка загрузки: {ex}")
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _show_cnn_train_step(self):
+        t = self.t
+        if self.state.cnn_dataset is None:
+            self.content_panel.content = ft.Text("Сначала выбери датасет",
+                                                 color=t.fg3)
+            return
+        d = self.state.cnn_dataset
+
+        hidden_label = ft.Text(f"FC hidden size: {self.state.cnn_hidden_size}",
+                               size=12, color=t.fg1)
+        hidden_slider = ft.Slider(
+            min=32, max=512, divisions=15, value=self.state.cnn_hidden_size,
+            active_color=t.acc, inactive_color=t.line2, width=400,
+            on_change=lambda e: (
+                setattr(self.state, "cnn_hidden_size", int(e.control.value)),
+                setattr(hidden_label, "value",
+                        f"FC hidden size: {int(e.control.value)}"),
+                self.page.update(),
+            ),
+        )
+
+        epochs_label = ft.Text(f"Эпох: {self.state.cnn_epochs}",
+                               size=12, color=t.fg1)
+        epochs_slider = ft.Slider(
+            min=1, max=50, divisions=49, value=self.state.cnn_epochs,
+            active_color=t.acc, inactive_color=t.line2, width=400,
+            on_change=lambda e: (
+                setattr(self.state, "cnn_epochs", int(e.control.value)),
+                setattr(epochs_label, "value", f"Эпох: {int(e.control.value)}"),
+                self.page.update(),
+            ),
+        )
+
+        lr_dropdown = ft.Dropdown(
+            label="learning rate", value=str(self.state.cnn_lr),
+            options=[ft.dropdown.Option(v) for v in
+                     ["0.0001", "0.0005", "0.001", "0.003", "0.01"]],
+            on_change=lambda e: setattr(self.state, "cnn_lr", float(e.control.value)),
+            width=180,
+        )
+        batch_dropdown = ft.Dropdown(
+            label="batch size", value=str(self.state.cnn_batch_size),
+            options=[ft.dropdown.Option(v) for v in ["32", "64", "128", "256"]],
+            on_change=lambda e: setattr(self.state, "cnn_batch_size", int(e.control.value)),
+            width=180,
+        )
+
+        # Live chart loss + acc
+        self.cnn_loss_chart = ft.LineChart(
+            data_series=[
+                ft.LineChartData(data_points=[], color=t.acc,
+                                 stroke_width=2, curved=False),
+                ft.LineChartData(data_points=[], color=t.success,
+                                 stroke_width=2, curved=False),
+            ],
+            border=ft.border.all(1, t.line2),
+            horizontal_grid_lines=ft.ChartGridLines(interval=0.2, width=1, color=t.line2),
+            vertical_grid_lines=ft.ChartGridLines(width=1, color=t.line2),
+            left_axis=ft.ChartAxis(
+                labels_size=50, labels_interval=0.2,
+                title=ft.Text("норм.", color=t.fg3, size=10), title_size=20,
+            ),
+            bottom_axis=ft.ChartAxis(
+                labels_size=20,
+                title=ft.Text("эпоха", color=t.fg3, size=10), title_size=14,
+            ),
+            min_x=0, max_x=self.state.cnn_epochs, min_y=0, max_y=1,
+            expand=True, height=260,
+        )
+
+        train_btn = ft.FilledButton(
+            text="Старт обучения", icon=ft.icons.PLAY_ARROW,
+            on_click=self._on_cnn_train_click,
+            style=ft.ButtonStyle(bgcolor=t.acc, color=t.bg0),
+        )
+        self.cnn_save_button = ft.OutlinedButton(
+            text="💾 Сохранить",
+            visible=self.state.cnn_model is not None,
+            on_click=lambda e: self._snackbar("CNN-сохранение в следующей версии"),
+        )
+        self.cnn_train_progress = ft.ProgressBar(visible=False, width=400, color=t.acc)
+        self.cnn_train_status = ft.Text("Готово к старту", size=12, color=t.fg3)
+
+        self.content_panel.content = ft.Column([
+            ft.Text("Обучение CNN", size=24, weight=ft.FontWeight.W_500, color=t.fg1),
+            ft.Text(
+                f"Датасет: {d.info.title} · "
+                f"{len(d.X_train)} train / {len(d.X_test)} test · "
+                f"{d.info.image_size}×{d.info.image_size}",
+                size=12, color=t.fg3),
+            ft.Container(height=14),
+            ft.Text("Архитектура (Conv→ReLU→Pool ×2 → FC → FC)",
+                    size=13, weight=ft.FontWeight.W_500, color=t.fg1),
+            hidden_label, hidden_slider,
+            ft.Container(height=10),
+            ft.Text("Гиперпараметры", size=13, weight=ft.FontWeight.W_500, color=t.fg1),
+            epochs_label, epochs_slider,
+            ft.Row([lr_dropdown, batch_dropdown], spacing=12),
+            ft.Container(height=14),
+            ft.Row([train_btn, self.cnn_save_button], spacing=12),
+            self.cnn_train_progress,
+            self.cnn_train_status,
+            ft.Container(height=8),
+            ft.Text("Loss + Accuracy по эпохам (голубой = loss, зелёный = accuracy)",
+                    size=11, color=t.fg3),
+            self.cnn_loss_chart,
+        ], scroll=ft.ScrollMode.AUTO)
+
+        self._restore_cnn_train_view()
+
+    def _restore_cnn_train_view(self):
+        history = self.state.cnn_history
+        if not history:
+            return
+        max_loss = max(s.train_loss for s in history) * 1.1 or 1.0
+        last_epoch = history[-1].epoch
+        self.cnn_loss_chart.max_x = max(last_epoch, self.state.cnn_epochs)
+        self.cnn_loss_chart.data_series[0].data_points = [
+            ft.LineChartDataPoint(s.epoch, min(s.train_loss / max_loss, 1.0))
+            for s in history
+        ]
+        self.cnn_loss_chart.data_series[1].data_points = [
+            ft.LineChartDataPoint(s.epoch, s.train_acc) for s in history
+        ]
+        final = history[-1]
+        self.cnn_train_status.value = (
+            f"Готово! train acc: {final.train_acc*100:.2f}% · "
+            f"val acc: {(final.val_acc or 0)*100:.2f}% · "
+            f"всего эпох: {final.epoch}"
+        )
+
+    def _on_cnn_train_click(self, e):
+        d = self.state.cnn_dataset
+        if d is None:
+            self._snackbar("Сначала выбери датасет")
+            return
+        cfg = cm.CNNTrainConfig(
+            hidden_size=self.state.cnn_hidden_size,
+            epochs=self.state.cnn_epochs,
+            batch_size=self.state.cnn_batch_size,
+            learning_rate=self.state.cnn_lr,
+            device=self.state.device,
+        )
+        # Сброс
+        self.cnn_loss_chart.data_series[0].data_points = []
+        self.cnn_loss_chart.data_series[1].data_points = []
+        self.cnn_loss_chart.max_x = cfg.epochs
+        self.state.cnn_history = []
+        self.cnn_train_progress.visible = True
+        self.cnn_train_status.value = "Стартую..."
+        self.page.update()
+
+        max_loss_ref = {"val": None}
+
+        def on_epoch(stats: cm.CNNEpochStats):
+            if max_loss_ref["val"] is None:
+                max_loss_ref["val"] = stats.train_loss * 1.1 or 1.0
+            scale = max_loss_ref["val"]
+            self.cnn_loss_chart.data_series[0].data_points.append(
+                ft.LineChartDataPoint(stats.epoch, min(stats.train_loss / scale, 1.0))
+            )
+            self.cnn_loss_chart.data_series[1].data_points.append(
+                ft.LineChartDataPoint(stats.epoch, stats.train_acc)
+            )
+            self.cnn_train_status.value = (
+                f"Эпоха {stats.epoch}/{cfg.epochs} · "
+                f"train loss: {stats.train_loss:.4f} · "
+                f"acc: {stats.train_acc*100:.2f}%"
+                + (f" · val acc: {stats.val_acc*100:.2f}%"
+                   if stats.val_acc is not None else "")
+                + f" · {stats.elapsed_sec:.1f}с"
+            )
+            try:
+                self.page.update()
+            except Exception:
+                pass
+
+        def worker():
+            try:
+                model, history = cm.train_cnn(
+                    d.X_train, d.y_train, d.X_test, d.y_test,
+                    cfg, num_classes=d.info.num_classes, on_epoch=on_epoch,
+                )
+                self.state.cnn_model = model
+                self.state.cnn_history = history
+                final = history[-1]
+                self.cnn_train_status.value = (
+                    f"Готово! Final train acc: {final.train_acc*100:.2f}% · "
+                    f"val acc: {(final.val_acc or 0)*100:.2f}% · "
+                    f"{final.elapsed_sec:.1f}с · "
+                    f"{model.count_params():,} параметров".replace(",", " ")
+                )
+                self.cnn_save_button.visible = True
+            except Exception as ex:
+                self.cnn_train_status.value = f"Ошибка: {ex}"
+            finally:
+                self.cnn_train_progress.visible = False
+                try:
+                    self.page.update()
+                except Exception:
+                    pass
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _show_cnn_test_step(self):
+        t = self.t
+        if self.state.cnn_model is None or self.state.cnn_dataset is None:
+            self.content_panel.content = ft.Text("Сначала обучи модель", color=t.fg3)
+            return
+        model = self.state.cnn_model
+        d = self.state.cnn_dataset
+        class_names = d.info.class_names
+
+        # Берём 12 случайных тестовых картинок и предсказываем
+        n = len(d.X_test)
+        idx = np.random.choice(n, size=min(12, n), replace=False)
+        X_sample = d.X_test[idx]
+        y_true = d.y_test[idx]
+        y_pred = cm.predict_cnn(model, X_sample)
+        probs = cm.predict_proba_cnn(model, X_sample)
+
+        # Рендерим картинки через ASCII (Flet нет нативного отображения numpy)
+        # Лучше — конвертация в base64 PNG
+        import io, base64
+        from PIL import Image
+
+        cards = []
+        for i in range(len(idx)):
+            img = X_sample[i, 0]   # [H, W]
+            pil = Image.fromarray((img * 255).astype(np.uint8), mode="L")
+            buf = io.BytesIO()
+            pil.resize((84, 84), Image.NEAREST).save(buf, format="PNG")
+            b64 = base64.b64encode(buf.getvalue()).decode()
+
+            correct = (y_pred[i] == y_true[i])
+            conf = float(probs[i, y_pred[i]])
+            cards.append(ft.Container(
+                padding=10, border_radius=8,
+                border=ft.border.all(1, t.success if correct else t.danger),
+                bgcolor=t.bg2,
+                content=ft.Column([
+                    ft.Image(src_base64=b64, width=84, height=84,
+                             fit=ft.ImageFit.CONTAIN),
+                    ft.Text(f"Модель: {class_names[y_pred[i]]}",
+                            size=11, color=t.acc, weight=ft.FontWeight.W_600,
+                            font_family="Consolas, monospace"),
+                    ft.Text(f"Реальный: {class_names[y_true[i]]}",
+                            size=10, color=t.fg2,
+                            font_family="Consolas, monospace"),
+                    ft.Text(f"уверенность {conf*100:.1f}%",
+                            size=9, color=t.fg3,
+                            font_family="Consolas, monospace"),
+                ], spacing=4, horizontal_alignment=ft.CrossAxisAlignment.CENTER),
+            ))
+
+        refresh_btn = ft.FilledButton(
+            text="🎲 Новые примеры", icon=ft.icons.SHUFFLE,
+            on_click=lambda e: (self._show_cnn_test_step(), self.page.update()),
+            style=ft.ButtonStyle(bgcolor=t.acc, color=t.bg0),
+        )
+
+        # Общая accuracy на всём тест-сете
+        full_pred = cm.predict_cnn(model, d.X_test)
+        full_acc = float((full_pred == d.y_test).mean())
+
+        self.content_panel.content = ft.Column([
+            ft.Text("Тест CNN", size=24, weight=ft.FontWeight.W_500, color=t.fg1),
+            ft.Text(f"Точность на тест-сете: {full_acc*100:.2f}% ({len(d.X_test)} картинок)",
+                    size=13, color=t.acc, weight=ft.FontWeight.W_500),
+            ft.Container(height=8),
+            refresh_btn,
+            ft.Container(height=12),
+            ft.Text("Зелёная рамка = правильно, красная = ошибка",
+                    size=11, color=t.fg3),
+            ft.Container(height=8),
+            ft.Row(cards, spacing=10, wrap=True),
+        ], scroll=ft.ScrollMode.AUTO)
 
     # ================== ТЕКСТОВЫЙ РЕЖИМ ==================
 

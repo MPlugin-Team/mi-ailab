@@ -9,3 +9,5 @@ psutil>=5.9.0           # для детекта CPU/RAM в «Моя машина
 # Своя нейронка через PyTorch.
 # Для GPU-версии (CUDA): pip install torch --index-url https://download.pytorch.org/whl/cu121
 torch>=2.2.0
+torchvision>=0.17.0    # для MNIST/Fashion-MNIST в режиме CNN
+Pillow>=10.0.0          # для рендеринга тест-картинок в UI
