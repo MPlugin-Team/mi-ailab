@@ -156,14 +156,32 @@ def download_and_load_model(info: PretrainedModelInfo, use_4bit: bool = True):
     """
     Скачивает модель с HuggingFace (если нет в кэше) и возвращает (model, tokenizer).
 
+    Если рядом есть локальная папка models/<key>/ или models/<hf_short>/ —
+    использует её вместо скачивания (для офлайн-режима или ручной wget-загрузки).
+
     use_4bit: при True использует bitsandbytes для квантизации в 4-bit —
     позволяет 7B модели запускаться на 6 GB VRAM.
     """
     from transformers import AutoModelForCausalLM, AutoTokenizer
+    from pathlib import Path as _P
 
-    print(f"[lora] downloading {info.hf_id}...")
+    # Проверяем локальные кандидаты — пользователь мог скачать вручную через wget
+    hf_short = info.hf_id.split("/")[-1].lower().replace("-", "_").replace(".", "")
+    local_candidates = [
+        _P("models") / info.key,
+        _P("models") / hf_short,
+        _P("models") / info.hf_id.split("/")[-1],
+    ]
+    model_path = info.hf_id
+    for cand in local_candidates:
+        if cand.exists() and (cand / "config.json").exists():
+            model_path = str(cand)
+            print(f"[lora] using local model from {cand}")
+            break
+    else:
+        print(f"[lora] downloading {info.hf_id} from HuggingFace...")
 
-    tokenizer = AutoTokenizer.from_pretrained(info.hf_id, trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
@@ -187,7 +205,7 @@ def download_and_load_model(info: PretrainedModelInfo, use_4bit: bool = True):
     else:
         kwargs["torch_dtype"] = torch.float16 if torch.cuda.is_available() else torch.float32
 
-    model = AutoModelForCausalLM.from_pretrained(info.hf_id, **kwargs)
+    model = AutoModelForCausalLM.from_pretrained(model_path, **kwargs)
     print(f"[lora] loaded: {sum(p.numel() for p in model.parameters()):,} params"
           .replace(",", " "))
     return model, tokenizer
