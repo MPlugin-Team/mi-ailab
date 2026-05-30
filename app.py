@@ -118,6 +118,7 @@ class App:
 
         page.add(ft.Row([sidebar, self.content_panel], expand=True, spacing=0))
         self._show_current_step()
+        page.update()   # без этого content_panel не отрендерится при старте
 
     # === Сайдбар ===
 
