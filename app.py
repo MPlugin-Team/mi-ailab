@@ -2533,4 +2533,22 @@ def main(page: ft.Page):
 
 
 if __name__ == "__main__":
-    ft.app(target=main)
+    import argparse
+    parser = argparse.ArgumentParser(
+        description="Mi-AiLab — образовательная нейронная лаборатория."
+    )
+    parser.add_argument("--web", action="store_true",
+                        help="Запуск как веб-сервер (доступ через браузер)")
+    parser.add_argument("--port", type=int, default=8550,
+                        help="Порт для веб-режима (по умолчанию 8550)")
+    parser.add_argument("--host", default="0.0.0.0",
+                        help="Хост для веб-режима (0.0.0.0 = слушать все интерфейсы)")
+    args = parser.parse_args()
+
+    if args.web:
+        print(f"Mi-AiLab запускается как веб-сервис на http://{args.host}:{args.port}")
+        print("Открой эту ссылку в браузере. Ctrl+C для остановки.")
+        ft.app(target=main, view=ft.AppView.WEB_BROWSER,
+               host=args.host, port=args.port)
+    else:
+        ft.app(target=main)
