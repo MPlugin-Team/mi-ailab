@@ -29,6 +29,7 @@ from src import theme as theme_mod
 from src import model_storage as ms
 from src import cnn_model as cm
 from src import image_datasets as imds
+from src import tooltips as tips
 
 
 # === Общее состояние приложения ===
@@ -131,6 +132,45 @@ class App:
     def c(self, token: str) -> str:
         """Шорткат к цвету темы по строковому ключу. Используется в виджетах."""
         return getattr(self.t, token)
+
+    def _tip(self, key: str) -> ft.Control:
+        """Иконка (?) с tooltip-объяснением параметра. Используется рядом с лейблами."""
+        text = tips.get(key)
+        if not text:
+            return ft.Container()   # пусто если объяснения нет
+        return ft.Container(
+            content=ft.Icon(ft.icons.HELP_OUTLINE, size=14, color=self.t.fg3),
+            tooltip=text,
+            padding=ft.padding.only(left=4),
+        )
+
+    def _preset_row(self, presets: dict, on_apply) -> ft.Control:
+        """Строка с пресетами «🚀 Быстро / ⚖️ Средне / 🎯 Точно»."""
+        t = self.t
+        buttons = []
+        for key, p in presets.items():
+            buttons.append(ft.Container(
+                padding=ft.padding.symmetric(horizontal=14, vertical=10),
+                border_radius=8,
+                border=ft.border.all(1, t.line2),
+                bgcolor=t.bg2,
+                content=ft.Column([
+                    ft.Text(p["name"], size=13, color=t.fg1, weight=ft.FontWeight.W_600),
+                    ft.Text(p["desc"], size=10, color=t.fg3,
+                            font_family="Consolas, monospace"),
+                ], spacing=4),
+                on_click=lambda e, pp=p: on_apply(pp),
+                ink=True,
+            ))
+        return ft.Column([
+            ft.Row([
+                ft.Text("Готовые пресеты", size=12, color=t.fg2,
+                        weight=ft.FontWeight.W_500),
+                ft.Text("кликни чтобы применить", size=10, color=t.fg4,
+                        font_family="Consolas, monospace"),
+            ], spacing=8),
+            ft.Row(buttons, spacing=10, wrap=True),
+        ], spacing=8)
 
     def _build_sidebar(self) -> ft.Container:
         t = self.t
@@ -702,14 +742,22 @@ class App:
             ft.Text(f"Датасет: {self.state.dataset.info.title} · target: {self.state.target_column}",
                     size=12, color=self.c("fg3")),
             ft.Container(height=14),
-            ft.Text("Архитектура", size=13, weight=ft.FontWeight.W_500, color=self.c("fg1")),
+            self._preset_row(tips.REGRESSION_PRESETS, self._apply_regression_preset),
+            ft.Container(height=14),
+            ft.Row([
+                ft.Text("Архитектура", size=13, weight=ft.FontWeight.W_500, color=self.c("fg1")),
+                self._tip("hidden_layers"),
+            ], spacing=4),
             ft.Row([layers_label, self.params_label], spacing=20),
             layers_count_slider,
             layer_size_slider,
             ft.Container(height=14),
-            ft.Text("Гиперпараметры", size=13, weight=ft.FontWeight.W_500, color=self.c("fg1")),
+            ft.Row([
+                ft.Text("Гиперпараметры", size=13, weight=ft.FontWeight.W_500, color=self.c("fg1")),
+                self._tip("epochs"),
+            ], spacing=4),
             epochs_label, epochs_slider,
-            ft.Row([lr_dropdown, batch_dropdown], spacing=12),
+            ft.Row([lr_dropdown, batch_dropdown, self._tip("learning_rate")], spacing=12),
             normalize_switch,
             lr_schedule_switch,
             ft.Container(height=14),
@@ -826,6 +874,36 @@ class App:
             self._snackbar("Сначала обучи модель кнопкой «Старт обучения»")
             return
         self._run_training(existing_model=self.state.nn_model)
+
+    def _apply_regression_preset(self, p: dict):
+        self.state.hidden_layers = list(p["hidden_layers"])
+        self.state.epochs = p["epochs"]
+        self.state.learning_rate = p["learning_rate"]
+        self.state.batch_size = p["batch_size"]
+        self.state.normalize = p["normalize"]
+        self.state.lr_schedule = p["lr_schedule"]
+        self._snackbar(f"Применён пресет: {p['name']}")
+        self._show_train_step()
+        self.page.update()
+
+    def _apply_text_preset(self, p: dict):
+        self.state.text_hidden_size = p["hidden_size"]
+        self.state.text_num_layers = p["num_layers"]
+        self.state.text_epochs = p["epochs"]
+        self.state.text_lr = p["learning_rate"]
+        self.state.text_seq_len = p["seq_len"]
+        self._snackbar(f"Применён пресет: {p['name']}")
+        self._show_text_train_step()
+        self.page.update()
+
+    def _apply_cnn_preset(self, p: dict):
+        self.state.cnn_hidden_size = p["hidden_size"]
+        self.state.cnn_epochs = p["epochs"]
+        self.state.cnn_lr = p["learning_rate"]
+        self.state.cnn_batch_size = p["batch_size"]
+        self._snackbar(f"Применён пресет: {p['name']}")
+        self._show_cnn_train_step()
+        self.page.update()
 
     def _on_nn_save_click(self, e):
         if self.state.nn_model is None:
@@ -1664,13 +1742,21 @@ class App:
                 f"{d.info.image_size}×{d.info.image_size}",
                 size=12, color=t.fg3),
             ft.Container(height=14),
-            ft.Text("Архитектура (Conv→ReLU→Pool ×2 → FC → FC)",
-                    size=13, weight=ft.FontWeight.W_500, color=t.fg1),
+            self._preset_row(tips.CNN_PRESETS, self._apply_cnn_preset),
+            ft.Container(height=14),
+            ft.Row([
+                ft.Text("Архитектура (Conv→ReLU→Pool ×2 → FC → FC)",
+                        size=13, weight=ft.FontWeight.W_500, color=t.fg1),
+                self._tip("hidden_size_cnn"),
+            ], spacing=4),
             hidden_label, hidden_slider,
             ft.Container(height=10),
-            ft.Text("Гиперпараметры", size=13, weight=ft.FontWeight.W_500, color=t.fg1),
+            ft.Row([
+                ft.Text("Гиперпараметры", size=13, weight=ft.FontWeight.W_500, color=t.fg1),
+                self._tip("epochs"),
+            ], spacing=4),
             epochs_label, epochs_slider,
-            ft.Row([lr_dropdown, batch_dropdown], spacing=12),
+            ft.Row([lr_dropdown, batch_dropdown, self._tip("learning_rate")], spacing=12),
             ft.Container(height=14),
             ft.Row([train_btn, self.cnn_save_button], spacing=12),
             self.cnn_train_progress,
@@ -2036,14 +2122,24 @@ class App:
             ft.Text(f"Корпус: {corpus.title} · {corpus.description}",
                     size=12, color=self.c("fg3")),
             ft.Container(height=14),
-            ft.Text("Архитектура", size=13, weight=ft.FontWeight.W_500, color=self.c("fg1")),
+            self._preset_row(tips.TEXT_PRESETS, self._apply_text_preset),
+            ft.Container(height=14),
+            ft.Row([
+                ft.Text("Архитектура", size=13, weight=ft.FontWeight.W_500, color=self.c("fg1")),
+                self._tip("hidden_size_lstm"),
+            ], spacing=4),
             self.text_params_label,
             hidden_label, hidden_slider,
-            layers_label, layers_slider,
+            ft.Row([layers_label, self._tip("num_layers")], spacing=4),
+            layers_slider,
             ft.Container(height=10),
-            ft.Text("Гиперпараметры", size=13, weight=ft.FontWeight.W_500, color=self.c("fg1")),
+            ft.Row([
+                ft.Text("Гиперпараметры", size=13, weight=ft.FontWeight.W_500, color=self.c("fg1")),
+                self._tip("epochs"),
+            ], spacing=4),
             epochs_label, epochs_slider,
-            ft.Row([seq_dropdown, lr_dropdown], spacing=12),
+            ft.Row([seq_dropdown, self._tip("seq_len"),
+                    lr_dropdown, self._tip("learning_rate")], spacing=8),
             ft.Container(height=10),
             text_advanced,
             ft.Container(height=14),
