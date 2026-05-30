@@ -440,10 +440,9 @@ class App:
             getattr(self, method_name)()
 
     def _snackbar(self, msg: str):
-        # Flet 0.24: SnackBar показывается через page.snack_bar + open=True
-        sb = ft.SnackBar(content=ft.Text(msg))
-        self.page.snack_bar = sb
-        sb.open = True
+        # Flet 0.24+: SnackBar через page.overlay (старый page.snack_bar deprecated)
+        sb = ft.SnackBar(content=ft.Text(msg), open=True)
+        self.page.overlay.append(sb)
         self.page.update()
 
     # === Шаг 1: Датасет ===
@@ -2059,7 +2058,7 @@ class App:
         epochs_label = ft.Text(f"Эпох: {self.state.text_epochs}",
                                size=12, color=self.c("fg1"))
         epochs_slider = ft.Slider(
-            min=1, max=100, divisions=99, value=self.state.text_epochs,
+            min=1, max=500, divisions=499, value=self.state.text_epochs,
             active_color=self.c("acc"), inactive_color=self.c("line2"), width=400,
             on_change=lambda e: self._on_text_epochs_changed(int(e.control.value), epochs_label),
         )
@@ -2071,7 +2070,8 @@ class App:
         )
         lr_dropdown = ft.Dropdown(
             label="learning rate", value=str(self.state.text_lr),
-            options=[ft.dropdown.Option(v) for v in ["0.001", "0.003", "0.005", "0.01"]],
+            options=[ft.dropdown.Option(v) for v in
+                     ["0.0005", "0.001", "0.002", "0.003", "0.005", "0.01"]],
             on_change=lambda e: self._on_text_lr_changed(float(e.control.value)),
             width=180,
         )
