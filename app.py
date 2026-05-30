@@ -1558,13 +1558,16 @@ class App:
                 self.state.mode = "regression"
                 self.current_step = 2  # → Тест
                 self._snackbar(f"Загружена MLP «{meta.title}» — иди в Тест")
-            elif meta.kind == "lstm":
+            elif meta.kind in ("lstm", "transformer"):
                 model, m = ms.load_lstm(meta.path)
                 self.state.text_model = model
                 self.state.text_history = []
                 self.state.mode = "text"
+                # Подхватим арку чтобы UI правильно показал
+                self.state.text_arch = ("transformer" if meta.kind == "transformer"
+                                         else "lstm")
                 self.current_step = 2  # → Генерация
-                self._snackbar(f"Загружена LSTM «{meta.title}» — иди в Генерацию")
+                self._snackbar(f"Загружена {meta.kind.upper()} «{meta.title}» — иди в Генерацию")
             else:
                 self._snackbar(f"Неизвестный тип: {meta.kind}")
                 return

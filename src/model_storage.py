@@ -128,41 +128,94 @@ def load_mlp(path: Path) -> tuple[nn.MlpRegressor, dict]:
     return model, payload["meta"]
 
 
-# === LSTM (текст) ===
+# === LSTM / Transformer (текст) ===
+
+def _serialize_tokenizer(tokenizer) -> dict:
+    """Сохраняем токенайзер в dict. Поддерживаем CharTokenizer и BPETokenizer."""
+    # BPE — у него есть .tokenizer (HF Tokenizer), сериализуем его в JSON-строку
+    if hasattr(tokenizer, "tokenizer") and tokenizer.tokenizer is not None:
+        return {
+            "kind": "bpe",
+            "vocab_size": tokenizer.vocab_size,
+            "hf_json": tokenizer.tokenizer.to_str(),
+        }
+    # Иначе CharTokenizer — простой dict
+    return {
+        "kind": "char",
+        "vocab_size": tokenizer.vocab_size,
+        "stoi": tokenizer.stoi,
+        "itos": tokenizer.itos,
+    }
+
+
+def _restore_tokenizer(tok_data: dict):
+    """Восстановить токенайзер из сериализованного dict."""
+    if tok_data.get("kind") == "bpe":
+        from src.bpe_tokenizer import BPETokenizer
+        from tokenizers import Tokenizer as HFTokenizer
+        out = BPETokenizer()
+        out.tokenizer = HFTokenizer.from_str(tok_data["hf_json"])
+        out.vocab_size = out.tokenizer.get_vocab_size()
+        vocab = out.tokenizer.get_vocab()
+        out.stoi = vocab
+        out.itos = {i: s for s, i in vocab.items()}
+        return out
+    # char
+    tok = tm.CharTokenizer.__new__(tm.CharTokenizer)
+    tok.stoi = tok_data["stoi"]
+    tok.itos = {int(k): v for k, v in tok_data["itos"].items()}
+    tok.vocab_size = tok_data["vocab_size"]
+    return tok
+
 
 def save_lstm(
-    model: tm.CharLSTM,
+    model,                  # tm.CharLSTM | tform.MiniGPT
     title: str,
     corpus_name: str,
-    history: list[tm.TextEpochStats],
+    history: list,
     filename: str | None = None,
 ) -> Path:
-    """Сохранить char-LSTM с токенайзером."""
+    """Сохранить text-модель (LSTM или Transformer) с токенайзером.
+    Авто-определяет тип модели."""
+    from src import transformer_model as _tform
+
     if filename is None:
         ts = int(time.time())
         safe = "".join(c if c.isalnum() else "_" for c in title)[:40]
-        filename = f"lstm_{safe}_{ts}.pt"
+        prefix = "transformer" if isinstance(model, _tform.MiniGPT) else "lstm"
+        filename = f"{prefix}_{safe}_{ts}.pt"
     path = models_dir() / filename
 
     cpu_model = model.cpu()
     tokenizer = cpu_model.tokenizer
     if tokenizer is None:
-        raise ValueError("LSTM-модель без токенайзера нельзя сохранить")
+        raise ValueError("Модель без токенайзера нельзя сохранить")
 
-    payload = {
-        "kind": "lstm",
-        "version": 1,
-        "state_dict": cpu_model.state_dict(),
-        "architecture": {
+    # Архитектура зависит от типа модели
+    if isinstance(cpu_model, _tform.MiniGPT):
+        kind = "transformer"
+        arch = {
+            "vocab_size": cpu_model.vocab_size,
+            "seq_len": cpu_model.seq_len,
+            "n_embd": cpu_model.n_embd,
+            "n_head": cpu_model.n_head,
+            "n_layer": cpu_model.n_layer,
+        }
+    else:
+        kind = "lstm"
+        arch = {
             "vocab_size": cpu_model.vocab_size,
             "embed_size": cpu_model.embed_size,
             "hidden_size": cpu_model.hidden_size,
             "num_layers": cpu_model.num_layers,
-        },
-        "tokenizer": {
-            "stoi": tokenizer.stoi,
-            "itos": tokenizer.itos,
-        },
+        }
+
+    payload = {
+        "kind": kind,
+        "version": 2,
+        "state_dict": cpu_model.state_dict(),
+        "architecture": arch,
+        "tokenizer": _serialize_tokenizer(tokenizer),
         "meta": {
             "title": title,
             "corpus": corpus_name,
@@ -177,29 +230,35 @@ def save_lstm(
     return path
 
 
-def load_lstm(path: Path) -> tuple[tm.CharLSTM, dict]:
-    """Загрузить char-LSTM с восстановлением токенайзера."""
+def load_lstm(path: Path):
+    """Загрузить text-модель (LSTM или Transformer) с токенайзером.
+    Возвращает (модель, meta-dict)."""
+    from src import transformer_model as _tform
     payload = torch.load(path, map_location="cpu", weights_only=False)
-    if payload.get("kind") != "lstm":
-        raise ValueError(f"{path.name}: не LSTM-модель (kind={payload.get('kind')})")
+    kind = payload.get("kind")
+    if kind not in ("lstm", "transformer"):
+        raise ValueError(f"{path.name}: не text-модель (kind={kind})")
 
     arch = payload["architecture"]
-    model = tm.CharLSTM(
-        vocab_size=arch["vocab_size"],
-        embed_size=arch["embed_size"],
-        hidden_size=arch["hidden_size"],
-        num_layers=arch["num_layers"],
-        dropout=0.0,  # при загрузке dropout не нужен
-    )
+    if kind == "transformer":
+        model = _tform.MiniGPT(
+            vocab_size=arch["vocab_size"],
+            seq_len=arch["seq_len"],
+            n_embd=arch["n_embd"],
+            n_head=arch["n_head"],
+            n_layer=arch["n_layer"],
+            dropout=0.0,
+        )
+    else:
+        model = tm.CharLSTM(
+            vocab_size=arch["vocab_size"],
+            embed_size=arch["embed_size"],
+            hidden_size=arch["hidden_size"],
+            num_layers=arch["num_layers"],
+            dropout=0.0,
+        )
     model.load_state_dict(payload["state_dict"])
-
-    # Восстанавливаем токенайзер из stoi/itos
-    tok = tm.CharTokenizer.__new__(tm.CharTokenizer)
-    tok.stoi = payload["tokenizer"]["stoi"]
-    tok.itos = {int(k): v for k, v in payload["tokenizer"]["itos"].items()}
-    tok.vocab_size = arch["vocab_size"]
-    model.tokenizer = tok
-
+    model.tokenizer = _restore_tokenizer(payload["tokenizer"])
     return model, payload["meta"]
 
 
