@@ -295,6 +295,104 @@ class App:
 
     # === Шаг 2: Обучение ===
 
+    def _build_advanced_section(
+        self,
+        *,
+        on_device_change,
+        on_optimizer_change,
+        current_device: str,
+        current_optimizer: str,
+        dropout_state_attr: str,
+        wd_state_attr: str = None,
+        on_dropout_change=None,
+        on_wd_change=None,
+    ) -> ft.Control:
+        """
+        Расширенные настройки (свернуты в ExpansionTile).
+        Используется в обоих train-экранах: regression и text.
+        """
+        # Device dropdown — авто/CPU/GPU (если есть)
+        info = self.state.hardware_info or hw.detect_hardware()
+        self.state.hardware_info = info
+        device_options = [
+            ft.dropdown.Option("auto", "Авто (предпочитать GPU)"),
+            ft.dropdown.Option("cpu", "CPU"),
+        ]
+        if info.has_gpu:
+            device_options.append(ft.dropdown.Option("cuda", f"GPU: {info.gpu_name}"))
+
+        device_dropdown = ft.Dropdown(
+            label="Устройство", value=current_device, options=device_options,
+            on_change=lambda e: on_device_change(e.control.value),
+            width=300,
+        )
+
+        optimizer_dropdown = ft.Dropdown(
+            label="Оптимизатор", value=current_optimizer,
+            options=[
+                ft.dropdown.Option("adam", "Adam (стандарт)"),
+                ft.dropdown.Option("adamw", "AdamW (с weight decay)"),
+                ft.dropdown.Option("sgd", "SGD + momentum"),
+                ft.dropdown.Option("rmsprop", "RMSprop"),
+            ],
+            on_change=lambda e: on_optimizer_change(e.control.value),
+            width=240,
+        )
+
+        # Dropout slider
+        current_dropout = getattr(self.state, dropout_state_attr)
+        dropout_label = ft.Text(
+            f"Dropout: {current_dropout:.2f}  (0 = выключен, 0.5 = сильный)",
+            size=12, color="#F2F3F5",
+        )
+        def _on_dropout(e):
+            v = round(float(e.control.value), 2)
+            setattr(self.state, dropout_state_attr, v)
+            dropout_label.value = f"Dropout: {v:.2f}  (0 = выключен, 0.5 = сильный)"
+            if on_dropout_change:
+                on_dropout_change(v)
+            self.page.update()
+        dropout_slider = ft.Slider(
+            min=0.0, max=0.5, divisions=10, value=current_dropout,
+            active_color="#00E5FF", inactive_color="#2B2D31", width=400,
+            on_change=_on_dropout,
+        )
+
+        # Weight decay
+        wd_dropdown = None
+        if wd_state_attr is not None:
+            current_wd = getattr(self.state, wd_state_attr)
+            wd_dropdown = ft.Dropdown(
+                label="Weight decay (L2)", value=str(current_wd),
+                options=[ft.dropdown.Option(v) for v in
+                         ["0", "0.0001", "0.001", "0.01"]],
+                on_change=lambda e: setattr(self.state, wd_state_attr,
+                                             float(e.control.value)),
+                width=200,
+            )
+
+        controls = [
+            ft.Row([device_dropdown, optimizer_dropdown], spacing=14),
+            ft.Container(height=8),
+            dropout_label, dropout_slider,
+        ]
+        if wd_dropdown is not None:
+            controls.append(ft.Container(height=6))
+            controls.append(wd_dropdown)
+
+        return ft.ExpansionTile(
+            title=ft.Text("⚙️ Расширенные настройки", size=13,
+                          weight=ft.FontWeight.W_500, color="#F2F3F5"),
+            subtitle=ft.Text("device, optimizer, dropout, weight decay",
+                             size=10, color="#8B8D93"),
+            controls=[ft.Container(padding=12, content=ft.Column(controls, spacing=6))],
+            initially_expanded=False,
+            bgcolor="#1A1B1E",
+            collapsed_bgcolor="#1A1B1E",
+            text_color="#F2F3F5",
+            icon_color="#00E5FF",
+        )
+
     def _show_train_step(self):
         if self.state.dataset is None:
             self.content_panel.content = ft.Text("Сначала выбери датасет", color="#8B8D93")
@@ -367,6 +465,16 @@ class App:
             on_change=lambda e: self._on_lr_schedule_changed(e.control.value),
         )
 
+        # === Расширенные настройки ===
+        advanced_section = self._build_advanced_section(
+            on_device_change=lambda v: setattr(self.state, "device", v),
+            on_optimizer_change=lambda v: setattr(self.state, "optimizer", v),
+            current_device=self.state.device,
+            current_optimizer=self.state.optimizer,
+            dropout_state_attr="dropout",
+            wd_state_attr="weight_decay",
+        )
+
         # === Live-график loss ===
         # Y-ось логарифмическая по факту: масштабируем сами после первой пары эпох
         self.loss_chart = ft.LineChart(
@@ -428,6 +536,8 @@ class App:
             ft.Row([lr_dropdown, batch_dropdown], spacing=12),
             normalize_switch,
             lr_schedule_switch,
+            ft.Container(height=14),
+            advanced_section,
             ft.Container(height=14),
             ft.Row([train_button, self.continue_button], spacing=12),
             self.train_progress,
@@ -1169,6 +1279,15 @@ class App:
             expand=True, height=220, tooltip_bgcolor="#0E0E11",
         )
 
+        # Расширенные настройки для text mode
+        text_advanced = self._build_advanced_section(
+            on_device_change=lambda v: setattr(self.state, "device", v),
+            on_optimizer_change=lambda v: setattr(self.state, "text_optimizer", v),
+            current_device=self.state.device,
+            current_optimizer=self.state.text_optimizer,
+            dropout_state_attr="text_dropout",
+        )
+
         train_button = ft.FilledButton(
             text="Старт обучения", icon=ft.icons.PLAY_ARROW,
             on_click=self._on_text_train_click,
@@ -1203,6 +1322,8 @@ class App:
             ft.Text("Гиперпараметры", size=13, weight=ft.FontWeight.W_500, color="#F2F3F5"),
             epochs_label, epochs_slider,
             ft.Row([seq_dropdown, lr_dropdown], spacing=12),
+            ft.Container(height=10),
+            text_advanced,
             ft.Container(height=14),
             ft.Row([train_button, self.text_continue_button], spacing=12),
             self.text_train_progress,
