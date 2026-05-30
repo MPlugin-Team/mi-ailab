@@ -885,6 +885,13 @@ class App:
             return
 
         corpus = self.state.text_corpus
+        vocab_size = len(set(corpus.text))   # вокабуляр для подсчёта параметров
+
+        # Параметры + контекст (живой счётчик)
+        self.text_params_label = ft.Text(
+            self._text_params_summary(vocab_size),
+            size=12, color="#00E5FF", weight=ft.FontWeight.W_500,
+        )
 
         # Гиперпараметры
         hidden_label = ft.Text(f"Hidden size (нейронов LSTM): {self.state.text_hidden_size}",
@@ -892,14 +899,16 @@ class App:
         hidden_slider = ft.Slider(
             min=32, max=512, divisions=15, value=self.state.text_hidden_size,
             active_color="#00E5FF", inactive_color="#2B2D31", width=400,
-            on_change=lambda e: self._on_text_hidden_changed(int(e.control.value), hidden_label),
+            on_change=lambda e: self._on_text_hidden_changed(
+                int(e.control.value), hidden_label, vocab_size),
         )
         layers_label = ft.Text(f"LSTM-слоёв: {self.state.text_num_layers}",
                                size=12, color="#F2F3F5")
         layers_slider = ft.Slider(
             min=1, max=4, divisions=3, value=self.state.text_num_layers,
             active_color="#00E5FF", inactive_color="#2B2D31", width=400,
-            on_change=lambda e: self._on_text_layers_changed(int(e.control.value), layers_label),
+            on_change=lambda e: self._on_text_layers_changed(
+                int(e.control.value), layers_label, vocab_size),
         )
         epochs_label = ft.Text(f"Эпох: {self.state.text_epochs}",
                                size=12, color="#F2F3F5")
@@ -911,7 +920,7 @@ class App:
         seq_dropdown = ft.Dropdown(
             label="seq_len (контекст)", value=str(self.state.text_seq_len),
             options=[ft.dropdown.Option(v) for v in ["50", "100", "200", "300"]],
-            on_change=lambda e: self._on_text_seq_changed(int(e.control.value)),
+            on_change=lambda e: self._on_text_seq_changed(int(e.control.value), vocab_size),
             width=180,
         )
         lr_dropdown = ft.Dropdown(
@@ -969,6 +978,7 @@ class App:
                     size=12, color="#8B8D93"),
             ft.Container(height=14),
             ft.Text("Архитектура", size=13, weight=ft.FontWeight.W_500, color="#F2F3F5"),
+            self.text_params_label,
             hidden_label, hidden_slider,
             layers_label, layers_slider,
             ft.Container(height=10),
@@ -988,14 +998,51 @@ class App:
             self.text_sample_box,
         ], scroll=ft.ScrollMode.AUTO)
 
-    def _on_text_hidden_changed(self, v: int, label: ft.Text):
+    @staticmethod
+    def _count_text_params(vocab_size: int, embed_size: int,
+                           hidden_size: int, num_layers: int) -> int:
+        """
+        Считает параметры char-LSTM по формуле PyTorch:
+          embedding:    vocab * embed
+          LSTM layer 1: 4 * hidden * (embed + hidden + 2)
+          LSTM layer N: 4 * hidden * (hidden + hidden + 2)
+          output:       (hidden + 1) * vocab
+        """
+        total = vocab_size * embed_size
+        for i in range(num_layers):
+            input_size = embed_size if i == 0 else hidden_size
+            total += 4 * hidden_size * (input_size + hidden_size + 2)
+        total += (hidden_size + 1) * vocab_size
+        return total
+
+    def _text_params_summary(self, vocab_size: int) -> str:
+        """Строка для UI: контекст + параметры + вокабуляр."""
+        params = self._count_text_params(
+            vocab_size,
+            self.state.text_embed_size,
+            self.state.text_hidden_size,
+            self.state.text_num_layers,
+        )
+        return (
+            f"Контекст: {self.state.text_seq_len} символов · "
+            f"вокабуляр: {vocab_size} · "
+            f"≈ {params:,} параметров".replace(",", " ")
+        )
+
+    def _refresh_text_params_label(self, vocab_size: int):
+        if hasattr(self, "text_params_label"):
+            self.text_params_label.value = self._text_params_summary(vocab_size)
+
+    def _on_text_hidden_changed(self, v: int, label: ft.Text, vocab_size: int):
         self.state.text_hidden_size = v
         label.value = f"Hidden size (нейронов LSTM): {v}"
+        self._refresh_text_params_label(vocab_size)
         self.page.update()
 
-    def _on_text_layers_changed(self, v: int, label: ft.Text):
+    def _on_text_layers_changed(self, v: int, label: ft.Text, vocab_size: int):
         self.state.text_num_layers = v
         label.value = f"LSTM-слоёв: {v}"
+        self._refresh_text_params_label(vocab_size)
         self.page.update()
 
     def _on_text_epochs_changed(self, v: int, label: ft.Text):
@@ -1004,8 +1051,10 @@ class App:
         self.text_loss_chart.max_x = v
         self.page.update()
 
-    def _on_text_seq_changed(self, v: int):
+    def _on_text_seq_changed(self, v: int, vocab_size: int):
         self.state.text_seq_len = v
+        self._refresh_text_params_label(vocab_size)
+        self.page.update()
 
     def _on_text_lr_changed(self, v: float):
         self.state.text_lr = v
