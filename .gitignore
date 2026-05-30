@@ -7,10 +7,14 @@ __pycache__/
 venv/
 
 # Training artifacts (могут быть огромными, не в git)
-models/*.pt
-models/*.pkl
-models/*.bin
+# Игнорируем ВСЁ в models/ — .pt, .safetensors, папки HF-моделей, LoRA-адаптеры
+models/*
+!models/.gitkeep              # сохраняем сам факт что папка существует
 *.ckpt
+
+# HuggingFace кэш если случайно попал в репо
+.cache/
+data/cache/                   # torchvision MNIST/Fashion downloads
 
 # IDE
 .vscode/
