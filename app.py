@@ -2582,7 +2582,8 @@ class App:
         )
         seq_dropdown = ft.Dropdown(
             label="seq_len (контекст)", value=str(self.state.text_seq_len),
-            options=[ft.dropdown.Option(v) for v in ["50", "100", "200", "300"]],
+            options=[ft.dropdown.Option(v) for v in
+                     ["50", "100", "200", "300", "512", "1024", "2048", "4096"]],
             on_change=lambda e: self._on_text_seq_changed(int(e.control.value), vocab_size),
             width=180,
         )
